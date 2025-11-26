@@ -1,116 +1,120 @@
 import tensorflow as tf
+from tensorflow.keras import layers, models, callbacks
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.applications import MobileNetV3Large
-from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout
-from tensorflow.keras.models import Model
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
-from tensorflow.keras.optimizers import Adam
+from sklearn.utils import class_weight
+import numpy as np
+import os
 
-# --- CONFIGURATION ---
-TRAIN_DIR = 'archive/train'  # <--- UPDATE THIS PATH
-TEST_DIR = 'archive/test'    # <--- UPDATE THIS PATH
+# Config
 IMG_SIZE = (224, 224)
-BATCH_SIZE = 32
-EPOCHS = 30
-NUM_CLASSES = 7  # Angry, Disgust, Fear, Happy, Sad, Surprise, Neutral
+BATCH_SIZE = 64
+EPOCHS = 30  
+NUM_CLASSES = 7
 
-# --- 1. DATA GENERATORS (Augmentation) ---
-# We use the native MobileNet preprocessing function
+# 1. Setup Data Generators with stronger augmentation
 train_datagen = ImageDataGenerator(
-    preprocessing_function=tf.keras.applications.mobilenet_v3.preprocess_input,
-    rotation_range=20,       # Rotate head slightly
-    width_shift_range=0.2,   # Shift left/right
-    height_shift_range=0.2,  # Shift up/down
-    shear_range=0.2,
-    zoom_range=0.2,          # Zoom in/out
-    horizontal_flip=True,    # Mirror face
+    rescale=1./255,
+    rotation_range=15,
+    width_shift_range=0.1,
+    height_shift_range=0.1,
+    shear_range=0.1,
+    zoom_range=0.1,
+    horizontal_flip=True,
     fill_mode='nearest'
 )
 
-test_datagen = ImageDataGenerator(
-    preprocessing_function=tf.keras.applications.mobilenet_v3.preprocess_input
-)
+val_datagen = ImageDataGenerator(rescale=1./255)
 
-print("Loading Training Data...")
-train_generator = train_datagen.flow_from_directory(
-    TRAIN_DIR,
-    target_size=IMG_SIZE,
-    batch_size=BATCH_SIZE,
+print("⏳ Loading Data...")
+train_gen = train_datagen.flow_from_directory(
+    'archive/train', 
+    target_size=IMG_SIZE, 
+    batch_size=BATCH_SIZE, 
+    color_mode='rgb', 
     class_mode='categorical',
     shuffle=True
 )
 
-print("Loading Validation Data...")
-validation_generator = test_datagen.flow_from_directory(
-    TEST_DIR,
-    target_size=IMG_SIZE,
-    batch_size=BATCH_SIZE,
+val_gen = val_datagen.flow_from_directory(
+    'archive/test', 
+    target_size=IMG_SIZE, 
+    batch_size=BATCH_SIZE, 
+    color_mode='rgb', 
     class_mode='categorical',
     shuffle=False
 )
 
-# --- 2. BUILD MODEL ---
-# Load MobileNetV3 without the top layer (include_top=False)
-base_model = MobileNetV3Large(
-    weights='imagenet', 
-    include_top=False, 
-    input_shape=(224, 224, 3)
+# 2. Compute Class Weights (The Fix for "Only Happy")
+# This calculates which emotions are rare and tells the model to focus on them more.
+class_weights = class_weight.compute_class_weight(
+    class_weight='balanced',
+    classes=np.unique(train_gen.classes),
+    y=train_gen.classes
 )
+class_weights_dict = dict(enumerate(class_weights))
+print(f"⚖️ Class Weights: {class_weights_dict}")
 
-# Freeze the base model layers (so we don't destroy ImageNet weights)
-base_model.trainable = False 
-
-# Add our custom Emotion Classification head
-x = base_model.output
-x = GlobalAveragePooling2D()(x)
-x = Dense(1024, activation='relu')(x)
-x = Dropout(0.5)(x) # Dropout helps prevent overfitting
-predictions = Dense(NUM_CLASSES, activation='softmax')(x)
-
-model = Model(inputs=base_model.input, outputs=predictions)
-
-# Compile
-model.compile(
-    optimizer=Adam(learning_rate=0.001),
-    loss='categorical_crossentropy',
-    metrics=['accuracy']
+# 3. Build Model (MobileNetV3)
+base_model = tf.keras.applications.MobileNetV3Small(
+    input_shape=IMG_SIZE + (3,),
+    include_top=False,
+    weights='imagenet',
+    minimalistic=True
 )
+base_model.trainable = True # Unfreeze specifically for better accuracy
 
-# --- 3. TRAIN ---
-# Callbacks help stop training if the model stops improving
-callbacks = [
-    EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
-    ModelCheckpoint('best_emotion_model.h5', monitor='val_accuracy', save_best_only=True)
-]
-
-print("Starting Training...")
-history = model.fit(
-    train_generator,
-    epochs=EPOCHS,
-    validation_data=validation_generator,
-    callbacks=callbacks
-)
-
-# --- 4. OPTIONAL: FINE TUNING ---
-# Unfreeze the last few layers of MobileNet for better accuracy
-print("Fine-tuning...")
-base_model.trainable = True
-# Freeze all layers except the last 20
+# Fine-tune: Keep bottom layers frozen, train top layers
 for layer in base_model.layers[:-20]:
     layer.trainable = False
+    
 
+
+
+model = models.Sequential([
+    base_model,
+    layers.GlobalAveragePooling2D(),
+    layers.Dense(256, activation='relu'), # Increased density
+    layers.Dropout(0.4), # Higher dropout to prevent overfitting
+    layers.Dense(NUM_CLASSES, activation='softmax')
+])
+
+# 4. Compile with a lower learning rate
 model.compile(
-    optimizer=Adam(learning_rate=1e-5), # Lower learning rate for fine-tuning
+    optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001), # Slower, more careful learning
     loss='categorical_crossentropy',
     metrics=['accuracy']
 )
 
-history_fine = model.fit(
-    train_generator,
-    epochs=10, # Train for a few more epochs
-    validation_data=validation_generator
+# 5. Callbacks (The Safety Nets)
+checkpoint = callbacks.ModelCheckpoint(
+    'mobilenet_best.h5', 
+    monitor='val_accuracy', 
+    save_best_only=True, 
+    mode='max', 
+    verbose=1
 )
 
-# --- 5. SAVE FINAL MODEL ---
-model.save('final_emotion_model.h5')
-print("Model saved as final_emotion_model.h5")
+reduce_lr = callbacks.ReduceLROnPlateau(
+    monitor='val_loss', 
+    factor=0.5, 
+    patience=3, 
+    min_lr=1e-6, 
+    verbose=1
+)
+
+early_stop = callbacks.EarlyStopping(
+    monitor='val_loss', 
+    patience=8, 
+    restore_best_weights=True
+)
+
+print("🚀 Starting Robust Training...")
+history = model.fit(
+    train_gen,
+    epochs=EPOCHS,
+    validation_data=val_gen,
+    class_weight=class_weights_dict, # <--- CRITICAL LINE
+    callbacks=[checkpoint, reduce_lr, early_stop]
+)
+
+print("✅ Best Model Saved as 'mobilenet_best.h5'")

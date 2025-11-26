@@ -1,113 +1,190 @@
+import time
+import collections
 import cv2
-import mediapipe as mp
 import numpy as np
+import mediapipe as mp
 import tensorflow as tf
-from tensorflow.keras.applications import MobileNetV3Large
-from tensorflow.keras.layers import Dense, GlobalAveragePooling2D
-from tensorflow.keras.models import Model
 
-# --- 1. SETUP MODEL (Ideally, load your trained weights here) ---
-def build_mobilenet_emotion_model():
-    # We use MobileNetV3Large as the base
-    # input_shape=(224, 224, 3) is standard for MobileNet
-    base_model = MobileNetV3Large(input_shape=(224, 224, 3), include_top=False, weights='mobilenet_emotion.h5')
-    
-    # Add custom layers for Emotion Classification
-    x = base_model.output
-    x = GlobalAveragePooling2D()(x)
-    x = Dense(1024, activation='relu')(x)
-    # 7 Output classes: Angry, Disgust, Fear, Happy, Sad, Surprise, Neutral
-    predictions = Dense(7, activation='softmax')(x)
-    
-    model = Model(inputs=base_model.input, outputs=predictions)
-    return model
+# -------------------------
+# CONFIG
+# -------------------------
+MODEL_PATH = "mobilenet_best.h5"   
+# Standard alphabetical order for FER-2013
+EMOTIONS = ['angry', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise']
 
-# Initialize model
-model = build_mobilenet_emotion_model()
-# model.load_weights('your_trained_emotion_weights.h5') # <--- UNCOMMENT THIS AFTER TRAINING
-print("MobileNetV3 Loaded!")
+MAX_HISTORY = 5                       
+MIN_FACE_SIZE = 60                    
+DISPLAY_FPS = True
 
-# Emotion Labels
-EMOTIONS = ["Angry", "Disgust", "Fear", "Happy", "Sad", "Surprise", "Neutral"]
+# -------------------------
+# HELPERS
+# -------------------------
+def smooth_point(history_deque, new_point):
+    history_deque.append(new_point)
+    pts = np.array(history_deque)
+    return tuple(np.mean(pts, axis=0).astype(int))
 
-# --- 2. SETUP MEDIAPIPE ---
+def smooth_box(history_deque, new_box):
+    history_deque.append(new_box)
+    arr = np.array(history_deque)
+    mean = arr.mean(axis=0).astype(int)
+    return tuple(mean.tolist())
+
+def safe_crop(img, box):
+    x1, y1, x2, y2 = box
+    h, w = img.shape[:2]
+    x1 = max(0, min(w, x1))
+    x2 = max(0, min(w, x2))
+    y1 = max(0, min(h, y1))
+    y2 = max(0, min(h, y2))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return img[y1:y2, x1:x2]
+
+# -------------------------
+# LOAD MODEL
+# -------------------------
+print(f"Loading model: {MODEL_PATH}...")
+try:
+    model = tf.keras.models.load_model(MODEL_PATH, compile=False)
+    _, IN_H, IN_W, IN_C = model.input_shape
+    print(f"✅ Model loaded! Expecting input: {IN_H}x{IN_W}")
+except Exception as e:
+    print(f"❌ Error loading model: {e}")
+    exit()
+
+# -------------------------
+# INITIALIZE MEDIAPIPE
+# -------------------------
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(
     max_num_faces=1,
-    refine_landmarks=True,
+    refine_landmarks=True,   
     min_detection_confidence=0.5,
     min_tracking_confidence=0.5
 )
 
+LEFT_IRIS_CENTER = 468
+RIGHT_IRIS_CENTER = 473
+bbox_history = collections.deque(maxlen=MAX_HISTORY)
+l_iris_hist = collections.deque(maxlen=MAX_HISTORY)
+r_iris_hist = collections.deque(maxlen=MAX_HISTORY)
+
+# -------------------------
+# VIDEO LOOP
+# -------------------------
 cap = cv2.VideoCapture(0)
+prev_time = time.time()
+frame_count = 0
+fps = 0.0
+
+print("🚀 Hybrid System Running. Look for the 'What AI Sees' window.")
 
 while cap.isOpened():
-    success, frame = cap.read()
-    if not success:
-        break
+    ret, frame = cap.read()
+    if not ret: break
 
-    # Flip and convert
-    frame = cv2.flip(frame, 1)
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    height, width, _ = frame.shape
-
-    # Process with MediaPipe
-    results = face_mesh.process(rgb_frame)
+    frame_count += 1
+    h, w = frame.shape[:2]
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = face_mesh.process(rgb)
 
     if results.multi_face_landmarks:
-        for face_landmarks in results.multi_face_landmarks:
+        face_landmarks = results.multi_face_landmarks[0]
+        pts = np.array([[int(p.x * w), int(p.y * h)] for p in face_landmarks.landmark])
+
+        # 1. FORCE SQUARE CROP
+        x_min, y_min = np.min(pts[:,0]), np.min(pts[:,1])
+        x_max, y_max = np.max(pts[:,0]), np.max(pts[:,1])
+        
+        box_w = x_max - x_min
+        box_h = y_max - y_min
+        cx = x_min + box_w // 2
+        cy = y_min + box_h // 2
+        
+        max_dim = max(box_w, box_h)
+        pad = int(max_dim * 0.15) 
+        size = max_dim + pad
+        
+        sx1 = cx - size // 2
+        sy1 = cy - size // 2
+        sx2 = cx + size // 2
+        sy2 = cy + size // 2
+
+        smooth_bbox = smooth_box(bbox_history, (sx1, sy1, sx2, sy2))
+        fx1, fy1, fx2, fy2 = smooth_bbox
+
+        if (fx2 - fx1) > MIN_FACE_SIZE:
+            face_roi = safe_crop(frame, (fx1, fy1, fx2, fy2))
             
-            # --- 3. DYNAMIC CROPPING ---
-            # We need to find the bounding box of the face from the mesh
-            x_min, y_min = width, height
-            x_max, y_max = 0, 0
+            if face_roi is not None and face_roi.size > 0:
+                try:
+                    # Resize to model input
+                    roi = cv2.resize(face_roi, (224, 224), interpolation=cv2.INTER_CUBIC)
+
+                    # ----------------------------------------
+                    # 🟢 NEW: PREPROCESSING FIX
+                    # ----------------------------------------
+                    # 1. Convert to Grayscale (removes color noise)
+                    roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                    
+                    # 2. Equalize Histogram (Boosts contrast - makes features POP)
+                    roi_gray = cv2.equalizeHist(roi_gray)
+                    
+                    # 3. Convert BACK to RGB (MobileNet needs 3 channels)
+                    roi_rgb = cv2.cvtColor(roi_gray, cv2.COLOR_GRAY2RGB)
+
+                    # Show exactly what the AI sees
+                    debug_view = cv2.resize(roi_rgb, (200, 200))
+                    cv2.imshow("What AI Sees", debug_view)
+
+                    # 4. Normalize (0.0 - 1.0)
+                    roi_pp = roi_rgb.astype(np.float32) / 255.0
+                    roi_pp = np.expand_dims(roi_pp, axis=0)
+                    # ----------------------------------------
+
+                    # Predict
+                    preds = model.predict(roi_pp, verbose=0)
+                    
+                    # DEBUG: Print scores to see if it's stuck
+                    # print(f"Scores: {np.round(preds[0], 2)}")
+
+                    idx = int(np.argmax(preds[0]))
+                    conf = float(preds[0][idx])
+                    label = EMOTIONS[idx]
+
+                    # Visualization
+                    color = (0, 255, 0) if label == 'happy' else (0, 0, 255)
+                    cv2.rectangle(frame, (fx1, fy1), (fx2, fy2), color, 2)
+                    
+                    label_text = f"{label} {int(conf*100)}%"
+                    cv2.rectangle(frame, (fx1, fy1-30), (fx1+200, fy1), color, -1)
+                    cv2.putText(frame, label_text, (fx1 + 5, fy1 - 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
+                except Exception as ex:
+                    print(f"Error: {ex}")
+
+        # IRIS TRACKING
+        if LEFT_IRIS_CENTER < len(pts) and RIGHT_IRIS_CENTER < len(pts):
+            l_pt = pts[LEFT_IRIS_CENTER]
+            r_pt = pts[RIGHT_IRIS_CENTER]
+            l_smooth = smooth_point(l_iris_hist, l_pt)
+            r_smooth = smooth_point(r_iris_hist, r_pt)
             
-            for lm in face_landmarks.landmark:
-                x, y = int(lm.x * width), int(lm.y * height)
-                if x < x_min: x_min = x
-                if x > x_max: x_max = x
-                if y < y_min: y_min = y
-                if y > y_max: y_max = y
+            cv2.circle(frame, l_smooth, 4, (0, 255, 255), -1, cv2.LINE_AA)
+            cv2.circle(frame, r_smooth, 4, (0, 255, 255), -1, cv2.LINE_AA)
+            cv2.line(frame, l_smooth, r_smooth, (255, 255, 0), 1, cv2.LINE_AA)
 
-            # Add some padding to the crop so we don't cut the chin/forehead
-            padding = 20
-            x_min = max(0, x_min - padding)
-            y_min = max(0, y_min - padding)
-            x_max = min(width, x_max + padding)
-            y_max = min(height, y_max + padding)
+    if DISPLAY_FPS:
+        now = time.time()
+        fps = 0.9 * fps + 0.1 * (1 / (now - prev_time)) if (now-prev_time) > 0 else 0
+        prev_time = now
+        cv2.putText(frame, f"FPS: {int(fps)}", (10, h - 10), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
 
-            # Draw the bounding box for visualization
-            cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
-
-            # --- 4. PREPARE INPUT FOR MOBILENET ---
-            try:
-                # Crop the face
-                face_crop = frame[y_min:y_max, x_min:x_max]
-                
-                if face_crop.size != 0:
-                    # Resize to 224x224 (MobileNet standard)
-                    roi = cv2.resize(face_crop, (224, 224))
-                    roi = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
-                    roi = tf.keras.applications.mobilenet_v3.preprocess_input(roi)
-                    roi = np.expand_dims(roi, axis=0) # Add batch dimension
-
-                    # --- 5. PREDICT EMOTION ---
-                    # Note: Without training, this prediction will be random/nonsense
-                    prediction = model.predict(roi, verbose=0)
-                    max_index = int(np.argmax(prediction))
-                    emotion_label = EMOTIONS[max_index]
-                    confidence = prediction[0][max_index]
-
-                    # Display the emotion
-                    text = f"{emotion_label} ({confidence*100:.1f}%)"
-                    cv2.putText(frame, text, (x_min, y_min - 10), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-            except Exception as e:
-                print(f"Error in processing: {e}")
-
-    cv2.imshow('MobileNetV3 + MediaPipe', frame)
-
-    if cv2.waitKey(5) & 0xFF == 27:
+    cv2.imshow("Hybrid System", frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
 cap.release()
