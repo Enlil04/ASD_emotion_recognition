@@ -11,7 +11,7 @@ BATCH_SIZE = 64
 EPOCHS = 30  
 NUM_CLASSES = 7
 
-# 1. Setup Data Generators with stronger augmentation
+# 1. Setup Data Generators
 train_datagen = ImageDataGenerator(
     rescale=1./255,
     rotation_range=15,
@@ -44,8 +44,7 @@ val_gen = val_datagen.flow_from_directory(
     shuffle=False
 )
 
-# 2. Compute Class Weights (The Fix for "Only Happy")
-# This calculates which emotions are rare and tells the model to focus on them more.
+# 2. Compute Class Weights => This calculates which emotions are rare and tells the model to focus on them more.
 class_weights = class_weight.compute_class_weight(
     class_weight='balanced',
     classes=np.unique(train_gen.classes),
@@ -65,7 +64,7 @@ base_model.trainable = True # Unfreeze specifically for better accuracy
 
 # Fine-tune: Keep bottom layers frozen, train top layers
 for layer in base_model.layers[:-20]:
-    layer.trainable = False
+    layer.trainable = False  # keep the lower 20 layers and
     
 
 
@@ -108,7 +107,7 @@ early_stop = callbacks.EarlyStopping(
     restore_best_weights=True
 )
 
-print("🚀 Starting Robust Training...")
+print(" Starting Training...")
 history = model.fit(
     train_gen,
     epochs=EPOCHS,
@@ -117,4 +116,4 @@ history = model.fit(
     callbacks=[checkpoint, reduce_lr, early_stop]
 )
 
-print("✅ Best Model Saved as 'mobilenet_best.h5'")
+print(" Model Saved as 'mobilenet_best.h5'")
