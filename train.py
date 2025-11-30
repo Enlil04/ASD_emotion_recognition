@@ -5,16 +5,22 @@ from sklearn.utils import class_weight
 import numpy as np
 import os
 
+
+# update this for your dataset path
+DATASET_PATH='archive/'
+
+
 # Config
 IMG_SIZE = (224, 224)
 BATCH_SIZE = 64
 EPOCHS = 30  
-NUM_CLASSES = 7
+#NUM_CLASSES = 7
+
 
 # 1. Setup Data Generators
 train_datagen = ImageDataGenerator(
     rescale=1./255,
-    rotation_range=15,
+    rotation_range=20,
     width_shift_range=0.1,
     height_shift_range=0.1,
     shear_range=0.1,
@@ -25,9 +31,12 @@ train_datagen = ImageDataGenerator(
 
 val_datagen = ImageDataGenerator(rescale=1./255)
 
+train_dir = os.path.join(DATASET_PATH, 'train')
+val_dir = os.path.join(DATASET_PATH, 'val') 
+
 print("⏳ Loading Data...")
 train_gen = train_datagen.flow_from_directory(
-    'archive/train', 
+    train_dir, 
     target_size=IMG_SIZE, 
     batch_size=BATCH_SIZE, 
     color_mode='rgb', 
@@ -36,7 +45,7 @@ train_gen = train_datagen.flow_from_directory(
 )
 
 val_gen = val_datagen.flow_from_directory(
-    'archive/test', 
+    val_dir, 
     target_size=IMG_SIZE, 
     batch_size=BATCH_SIZE, 
     color_mode='rgb', 
@@ -45,6 +54,8 @@ val_gen = val_datagen.flow_from_directory(
 )
 
 # 2. Compute Class Weights => This calculates which emotions are rare and tells the model to focus on them more.
+NUM_CLASSES = len(train_gen.class_indices)
+
 class_weights = class_weight.compute_class_weight(
     class_weight='balanced',
     classes=np.unique(train_gen.classes),
@@ -86,7 +97,7 @@ model.compile(
 
 # 5. Callbacks (The Safety Nets)
 checkpoint = callbacks.ModelCheckpoint(
-    'mobilenet_best.h5', 
+    'mobilenet_best_affectNet.h5', 
     monitor='val_accuracy', 
     save_best_only=True, 
     mode='max', 
@@ -116,4 +127,4 @@ history = model.fit(
     callbacks=[checkpoint, reduce_lr, early_stop]
 )
 
-print(" Model Saved as 'mobilenet_best.h5'")
+print(" Model Saved as 'mobilenet_best_AffectNet.h5'")

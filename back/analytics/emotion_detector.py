@@ -4,6 +4,8 @@ import cv2
 import numpy as np
 import mediapipe as mp
 import tensorflow as tf
+import json
+from pathlib import Path
 
 # -------------------------
 # CONFIG
@@ -122,17 +124,8 @@ while cap.isOpened():
                     # Resize to model input
                     roi = cv2.resize(face_roi, (224, 224), interpolation=cv2.INTER_CUBIC)
 
-                    # ----------------------------------------
-                    # 🟢 NEW: PREPROCESSING FIX
-                    # ----------------------------------------
-                    # 1. Convert to Grayscale (removes color noise)
-                    roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                    roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
                     
-                    # 2. Equalize Histogram (Boosts contrast - makes features POP)
-                    roi_gray = cv2.equalizeHist(roi_gray)
-                    
-                    # 3. Convert BACK to RGB (MobileNet needs 3 channels)
-                    roi_rgb = cv2.cvtColor(roi_gray, cv2.COLOR_GRAY2RGB)
 
                     # Show exactly what the AI sees
                     debug_view = cv2.resize(roi_rgb, (200, 200))
@@ -186,6 +179,49 @@ while cap.isOpened():
     cv2.imshow("Hybrid System", frame)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
+
+#------------------------------------------------------
+
+MEMORY_PATH = Path("local_memory/emotion_log.json")
+
+def save_emotion(label, confidence):
+    '''SAVE TO LOCAL MEMORY'''
+    entry = {
+        "timestamp": time.time(),
+        "emotion": label,
+        "confidence": confidence
+    }
+
+    if MEMORY_PATH.exists():
+        data = json.loads(MEMORY_PATH.read_text())
+    else:
+        data = []
+
+    data.append(entry)
+    MEMORY_PATH.write_text(json.dumps(data, indent=2))
+
+
+def compute_baseline(): 
+    '''save_emotion(label, conf) calculate the frequency distribution (or baseline probability)
+      of different emotions found in a memory file and save the result to a new JSON file.'''
+    if not MEMORY_PATH.exists():
+        return {}
+
+    data = json.loads(MEMORY_PATH.read_text())
+
+    counts = {}
+    for d in data:
+        e = d['emotion']
+        counts[e] = counts.get(e, 0) + 1
+
+    total = sum(counts.values())
+    baseline = {k: v/total for k,v in counts.items()}
+
+    Path("local_memory/baseline.json").write_text(
+        json.dumps(baseline, indent=2)
+    )
+
+#-----------------------------------------------------------------------------
 
 cap.release()
 cv2.destroyAllWindows()
