@@ -12,7 +12,7 @@ from pathlib import Path
 # -------------------------
 MODEL_PATH = "mobilenet_best.h5"   
 # Standard alphabetical order for FER-2013
-EMOTIONS = ['angry', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise']
+EMOTIONS = ['angry', 'contempt', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise']
 
 MAX_HISTORY = 5                       
 MIN_FACE_SIZE = 60                    
