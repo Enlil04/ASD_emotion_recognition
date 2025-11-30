@@ -10,16 +10,25 @@ from pathlib import Path
 # -------------------------
 # CONFIG
 # -------------------------
-MODEL_PATH = "mobilenet_best.h5"   
-# Standard alphabetical order for FER-2013
-EMOTIONS = ['angry', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise']
+MODEL_PATH = "mobilenet_best_AffectNet.h5"   # <--- Make sure this matches your new model name
+
+# 🟢 CHANGE 1: UPDATE LABELS FOR AFFECTNET (8 CLASSES)
+# Standard AffectNet Alphabetical Order:
+EMOTIONS = ['anger', 'contempt', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise']
 
 MAX_HISTORY = 5                       
 MIN_FACE_SIZE = 60                    
 DISPLAY_FPS = True
 
+# 🟢 CHANGE 2: SETUP MEMORY PATHS
+MEMORY_FILE = Path("local_memory/emotion_log.json")
+BASELINE_FILE = Path("local_memory/baseline.json")
+
+# Create the folder if it doesn't exist (Prevents crash)
+MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+
 # -------------------------
-# HELPERS
+# HELPERS (Moved to Top)
 # -------------------------
 def smooth_point(history_deque, new_point):
     history_deque.append(new_point)
@@ -42,6 +51,38 @@ def safe_crop(img, box):
     if x2 <= x1 or y2 <= y1:
         return None
     return img[y1:y2, x1:x2]
+
+# 🟢 CHANGE 3: MEMORY FUNCTIONS (Moved here so Loop can use them)
+def save_emotion_batch(entries):
+    '''Efficiently appends a list of entries to JSON'''
+    if not entries: return
+    
+    current_data = []
+    if MEMORY_FILE.exists():
+        try:
+            current_data = json.loads(MEMORY_FILE.read_text())
+        except:
+            current_data = [] # Handle corrupt file
+
+    current_data.extend(entries)
+    MEMORY_FILE.write_text(json.dumps(current_data, indent=2))
+
+def compute_baseline():
+    if not MEMORY_FILE.exists(): return
+    try:
+        data = json.loads(MEMORY_FILE.read_text())
+        counts = {}
+        for d in data:
+            e = d['emotion']
+            counts[e] = counts.get(e, 0) + 1
+        
+        total = sum(counts.values())
+        if total > 0:
+            baseline = {k: round(v/total, 3) for k,v in counts.items()}
+            BASELINE_FILE.write_text(json.dumps(baseline, indent=2))
+            print(f"📊 Baseline Updated: {baseline}")
+    except Exception as e:
+        print(f"Baseline error: {e}")
 
 # -------------------------
 # LOAD MODEL
@@ -72,6 +113,9 @@ bbox_history = collections.deque(maxlen=MAX_HISTORY)
 l_iris_hist = collections.deque(maxlen=MAX_HISTORY)
 r_iris_hist = collections.deque(maxlen=MAX_HISTORY)
 
+# Buffer for memory (to save periodically)
+memory_buffer = []
+
 # -------------------------
 # VIDEO LOOP
 # -------------------------
@@ -80,7 +124,7 @@ prev_time = time.time()
 frame_count = 0
 fps = 0.0
 
-print("🚀 Hybrid System Running. Look for the 'What AI Sees' window.")
+print("🚀 AffectNet Hybrid System Running...")
 
 while cap.isOpened():
     ret, frame = cap.read()
@@ -95,7 +139,7 @@ while cap.isOpened():
         face_landmarks = results.multi_face_landmarks[0]
         pts = np.array([[int(p.x * w), int(p.y * h)] for p in face_landmarks.landmark])
 
-        # 1. FORCE SQUARE CROP
+        # SQUARE CROP LOGIC
         x_min, y_min = np.min(pts[:,0]), np.min(pts[:,1])
         x_max, y_max = np.max(pts[:,0]), np.max(pts[:,1])
         
@@ -121,27 +165,20 @@ while cap.isOpened():
             
             if face_roi is not None and face_roi.size > 0:
                 try:
-                    # Resize to model input
-                    roi = cv2.resize(face_roi, (224, 224), interpolation=cv2.INTER_CUBIC)
-
+                    # Resize to model input (224x224 for AffectNet)
+                    roi = cv2.resize(face_roi, (IN_W, IN_H), interpolation=cv2.INTER_CUBIC)
                     roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
-                    
 
-                    # Show exactly what the AI sees
-                    debug_view = cv2.resize(roi_rgb, (200, 200))
-                    cv2.imshow("What AI Sees", debug_view)
+                    # Show what AI Sees
+                    cv2.imshow("What AI Sees", cv2.resize(roi_rgb, (200, 200)))
 
-                    # 4. Normalize (0.0 - 1.0)
+                    # Normalize
                     roi_pp = roi_rgb.astype(np.float32) / 255.0
                     roi_pp = np.expand_dims(roi_pp, axis=0)
-                    # ----------------------------------------
 
                     # Predict
                     preds = model.predict(roi_pp, verbose=0)
                     
-                    # DEBUG: Print scores to see if it's stuck
-                    # print(f"Scores: {np.round(preds[0], 2)}")
-
                     idx = int(np.argmax(preds[0]))
                     conf = float(preds[0][idx])
                     label = EMOTIONS[idx]
@@ -149,11 +186,26 @@ while cap.isOpened():
                     # Visualization
                     color = (0, 255, 0) if label == 'happy' else (0, 0, 255)
                     cv2.rectangle(frame, (fx1, fy1), (fx2, fy2), color, 2)
-                    
                     label_text = f"{label} {int(conf*100)}%"
                     cv2.rectangle(frame, (fx1, fy1-30), (fx1+200, fy1), color, -1)
                     cv2.putText(frame, label_text, (fx1 + 5, fy1 - 5),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
+                    # 🟢 CHANGE 4: SAVE TO MEMORY (THROTTLED)
+                    # Only save once every 15 frames (approx 0.5 seconds)
+                    if frame_count % 15 == 0:
+                        entry = {
+                            "timestamp": time.time(),
+                            "emotion": label,
+                            "confidence": round(conf, 4)
+                        }
+                        memory_buffer.append(entry)
+                        print(f"📝 Logged: {label}")
+
+                        # Flush buffer to file every 60 frames (approx 2 seconds)
+                        if len(memory_buffer) >= 4:
+                            save_emotion_batch(memory_buffer)
+                            memory_buffer = [] # Clear buffer
 
                 except Exception as ex:
                     print(f"Error: {ex}")
@@ -176,52 +228,18 @@ while cap.isOpened():
         cv2.putText(frame, f"FPS: {int(fps)}", (10, h - 10), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
 
-    cv2.imshow("Hybrid System", frame)
+    cv2.imshow("AffectNet Hybrid System", frame)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
-#------------------------------------------------------
-
-MEMORY_PATH = Path("local_memory/emotion_log.json")
-
-def save_emotion(label, confidence):
-    '''SAVE TO LOCAL MEMORY'''
-    entry = {
-        "timestamp": time.time(),
-        "emotion": label,
-        "confidence": confidence
-    }
-
-    if MEMORY_PATH.exists():
-        data = json.loads(MEMORY_PATH.read_text())
-    else:
-        data = []
-
-    data.append(entry)
-    MEMORY_PATH.write_text(json.dumps(data, indent=2))
-
-
-def compute_baseline(): 
-    '''save_emotion(label, conf) calculate the frequency distribution (or baseline probability)
-      of different emotions found in a memory file and save the result to a new JSON file.'''
-    if not MEMORY_PATH.exists():
-        return {}
-
-    data = json.loads(MEMORY_PATH.read_text())
-
-    counts = {}
-    for d in data:
-        e = d['emotion']
-        counts[e] = counts.get(e, 0) + 1
-
-    total = sum(counts.values())
-    baseline = {k: v/total for k,v in counts.items()}
-
-    Path("local_memory/baseline.json").write_text(
-        json.dumps(baseline, indent=2)
-    )
-
-#-----------------------------------------------------------------------------
+# -------------------------
+# CLEANUP
+# -------------------------
+# Save any remaining memory entries
+save_emotion_batch(memory_buffer)
+# Update baseline stats before exiting
+compute_baseline()
 
 cap.release()
 cv2.destroyAllWindows()
+print("👋 System exited safely.")
