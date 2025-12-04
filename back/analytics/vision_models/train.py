@@ -1,3 +1,5 @@
+# train.py - Rewritten with GPU and Safety Fixes
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -7,27 +9,24 @@ from sklearn.utils.class_weight import compute_class_weight
 import numpy as np
 import os
 
+# --- Configuration for Paths ---
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# One level up → .../back/analytics
 ANALYTICS_DIR = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
-
-# Full dataset path
 DATASET_DIR = os.path.join(
     ANALYTICS_DIR,
     "dataset",
     "archive_clean"
 )
 
-
-
-# CONFIG
+# --- CONFIG ---
 IMG_SIZE = 224
-BATCH_SIZE = 64
+BATCH_SIZE = 32  # Safer starting size for VRAM (was 64)
 EPOCHS = 30
-NUM_CLASSES = 8   # <-- AffectNet uses 8 classes
+NUM_CLASSES = 8  # AffectNet uses 8 classes
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print("Using device:", DEVICE)
+if DEVICE == "cuda":
+    print(f"CUDA device: {torch.cuda.get_device_name(0)}")
 
 # -----------------------------------
 # 1. Transforms (AffectNet correct)
@@ -54,91 +53,107 @@ val_transform = transforms.Compose([
 ])
 
 # -----------------------------------
-# 2. Datasets
+# 2. Main Logic Function
 # -----------------------------------
-train_ds = datasets.ImageFolder(
-    os.path.join(DATASET_DIR, "train"),
-    transform=train_transform
-)
+def train_model():
+    # --- 2. Datasets ---
+    try:
+        train_ds = datasets.ImageFolder(
+            os.path.join(DATASET_DIR, "train"),
+            transform=train_transform
+        )
+        val_ds = datasets.ImageFolder(
+            os.path.join(DATASET_DIR, "test"),
+            transform=val_transform
+        )
+    except Exception as e:
+        print(f"❌ Error loading datasets. Check DATASET_DIR: {DATASET_DIR}")
+        print(f"Details: {e}")
+        return
 
-val_ds = datasets.ImageFolder(
-    os.path.join(DATASET_DIR, "test"),
-    transform=val_transform
-)
+    print(f"Train samples: {len(train_ds)}, Val samples: {len(val_ds)}")
+    print("Train classes:", train_ds.classes)
 
+    # **CHANGE: num_workers added for faster data loading (set to 0 if freezing persists)**
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True) #from 4 to 0 if issues
+    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True) #from 4 to 0 if issues
 
-print("Train classes:", train_ds.classes)
-print("Val classes:", val_ds.classes)
+    # --- 3. Class Weights ---
+    labels = train_ds.targets
+    class_weights = compute_class_weight(
+        "balanced", 
+        classes=np.unique(labels), 
+        y=labels
+    )
+    # Weights moved to DEVICE (GPU)
+    class_weights = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
+    print("Class weights device:", class_weights.device)
 
-train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
-val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
+    # --- 4. Model (MobileNetV3 Small) ---
+    model = models.mobilenet_v3_small(weights="IMAGENET1K_V1")
+    model.classifier[3] = nn.Linear(model.classifier[3].in_features, NUM_CLASSES)
+    model = model.to(DEVICE)
+    print(f"Model moved to: {next(model.parameters()).device}")
 
-# -----------------------------------
-# 3. Class Weights
-# -----------------------------------
-labels = train_ds.targets
-class_weights = compute_class_weight(
-    "balanced", 
-    classes=np.unique(labels), 
-    y=labels
-)
-class_weights = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
-print("Class weights:", class_weights)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
-# -----------------------------------
-# 4. Model (MobileNetV3 Small)
-# -----------------------------------
-model = models.mobilenet_v3_small(weights="IMAGENET1K_V1")
-model.classifier[3] = nn.Linear(model.classifier[3].in_features, NUM_CLASSES)
-model = model.to(DEVICE)
+    # --- 5. Training Loop ---
+    best_acc = 0.0
 
-criterion = nn.CrossEntropyLoss(weight=class_weights)
-optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    for epoch in range(EPOCHS):
+        print(f"--- Starting Epoch {epoch+1}/{EPOCHS} ---")
+        model.train()
+        total, correct, epoch_loss = 0, 0, 0
 
-# -----------------------------------
-# 5. Training Loop
-# -----------------------------------
-best_acc = 0.0
-
-for epoch in range(EPOCHS):
-    model.train()
-    total, correct, epoch_loss = 0, 0, 0
-
-    for images, labels in train_loader:
-        images, labels = images.to(DEVICE), labels.to(DEVICE)
-
-        optimizer.zero_grad()
-        outputs = model(images)
-        loss = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
-
-        epoch_loss += loss.item()
-        _, preds = torch.max(outputs, 1)
-        correct += (preds == labels).sum().item()
-        total += labels.size(0)
-
-    train_acc = correct / total
-    print(f"Epoch {epoch+1}/{EPOCHS} | Train Acc: {train_acc:.3f}")
-
-    # Validation
-    model.eval()
-    val_correct, val_total = 0, 0
-    with torch.no_grad():
-        for images, labels in val_loader:
+        for batch_idx, (images, labels) in enumerate(train_loader):
+            # **FIX: Move data to GPU**
             images, labels = images.to(DEVICE), labels.to(DEVICE)
+
+            # Optional: Print to ensure batch loading is working
+            # if batch_idx == 0 and epoch == 0:
+            #     print("Batch loaded and moved to GPU. Training step starting...")
+
+            optimizer.zero_grad()
             outputs = model(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item()
             _, preds = torch.max(outputs, 1)
-            val_correct += (preds == labels).sum().item()
-            val_total += labels.size(0)
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
 
-    val_acc = val_correct / val_total
-    print(f"Validation Acc: {val_acc:.3f}")
+        train_acc = correct / total
+        print(f"Epoch {epoch+1}/{EPOCHS} | Train Loss: {epoch_loss/len(train_loader):.4f} | Train Acc: {train_acc:.3f}")
 
-    # Save best model
-    if val_acc > best_acc:
-        best_acc = val_acc
-        torch.save(model.state_dict(), "mobilenet_affectNet.pth")
-        print("💾 Saved best model!")
+        # Validation
+        model.eval()
+        val_correct, val_total = 0, 0
+        with torch.no_grad():
+            for images, labels in val_loader:
+                # **FIX: Move validation data to GPU**
+                images, labels = images.to(DEVICE), labels.to(DEVICE)
+                
+                outputs = model(images)
+                _, preds = torch.max(outputs, 1)
+                val_correct += (preds == labels).sum().item()
+                val_total += labels.size(0)
 
-print("Training Done!")
+        val_acc = val_correct / val_total
+        print(f"Validation Acc: {val_acc:.3f}")
+
+        # Save best model
+        if val_acc > best_acc:
+            best_acc = val_acc
+            torch.save(model.state_dict(), "mobilenet_affectNet.pth")
+            print("💾 Saved best model!")
+
+    print("Training Done!")
+
+# -----------------------------------
+# 6. Safety Entry Point
+# -----------------------------------
+if __name__ == "__main__":
+    train_model()
