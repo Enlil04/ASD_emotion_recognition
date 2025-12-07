@@ -78,12 +78,10 @@ def train_model():
 
     # --- 3. Class Weights ---
     labels = train_ds.targets
-    class_weights = compute_class_weight(
-        "balanced", 
-        classes=np.unique(labels), 
-        y=labels
-    )
-    class_weights = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
+    class_counts = np.bincount(labels)
+    total_samples = len(labels)
+    weights = np.sqrt(total_samples / (len(class_counts) * class_counts))
+    class_weights = torch.tensor(weights, dtype=torch.float).to(DEVICE)
     print("Class weights device:", class_weights.device)
 
     # --- 4. Model (MobileNetV3 Small) ---

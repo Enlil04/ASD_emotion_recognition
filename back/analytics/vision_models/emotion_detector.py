@@ -171,7 +171,7 @@ while cap.isOpened():
         cx = x_min + box_w // 2
         cy = y_min + box_h // 2
         max_dim = max(box_w, box_h)
-        pad = int(max_dim * 0.15) 
+        pad = int(max_dim * 0.40) 
         size = max_dim + pad
         sx1 = cx - size // 2
         sy1 = cy - size // 2
