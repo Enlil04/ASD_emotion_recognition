@@ -1,11 +1,10 @@
-# Here is the bridge
-# Koog: 
-# Runs workflows
-# Connects tools
-# Controls execution graph
-# Think of this as the conductor.
+# The Conductor / Orchestrator.
+""" Here is the bridge
+    Koog:  Runs workflows, Connects tools, Controls execution graph
+    This is the entry point. It connects your "eyes" (cameras/sensors) to your "brain" (Llama). 
+ It runs the continuous cycle of life: Sense -> Think -> Act."""
 
-#This is the main loop that ties your vision models to the agent. This script runs the "Sense -> Think -> Act" loop.
+#This is the main loop that ties your vision models to the agent. 
 
 import time
 import sys
@@ -19,7 +18,9 @@ from analytics.vision_models.emotion_detector import EmotionDetector
 # Assuming you have a gaze detector class similarly
 # from analytics.vision_models.gaze_detector import GazeDetector
 
-def main_loop():
+'''grabs the latest frame data, packages it into a standard format (vision_packet), and sends it to the brain.'''
+def main_loop(): 
+
     print("--- Starting Agentic Orchestrator (Python Prototype) ---")
     
     # Initialize Modules
@@ -31,8 +32,9 @@ def main_loop():
             # 1. SENSE: Get data from Vision Models
             # specific implementation depends on your vision_models code
             current_emotion = eyes.detect_latest_frame() 
+
             current_gaze = "looking_at_screen" # Placeholder for your iris code
-            
+            #this is the most critical variable. It normalizes raw sensor data (pixels/angles) into a dictionary the LLM can read (e.g., {'emotion': 'happy', 'gaze': 'left'}).
             vision_packet = {
                 "emotion": current_emotion,
                 "gaze": current_gaze,

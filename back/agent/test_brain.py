@@ -1,4 +1,5 @@
-# back/agent/test_brain.py
+# The Simulation / Latency Tester for Llama 3.2 3B
+"""Quality Assurance / Latency Testing. This is crucial because real-time social assistance requires low latency."""
 import time
 from llama_reasoner import LlamaReasoner
 
