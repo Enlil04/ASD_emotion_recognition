@@ -29,6 +29,8 @@ if DEVICE == "cuda":
 # -----------------------------------
 # 1. Transforms (AffectNet correct)
 # -----------------------------------
+
+# train_transform is for data augmentation
 train_transform = transforms.Compose([
     transforms.Resize((IMG_SIZE, IMG_SIZE)),
     transforms.RandomRotation(15),
@@ -41,6 +43,7 @@ train_transform = transforms.Compose([
     )
 ])
 
+# cleans the images to make it like they came from camera
 val_transform = transforms.Compose([
     transforms.Resize((IMG_SIZE, IMG_SIZE)),
     transforms.ToTensor(),
@@ -56,16 +59,18 @@ val_transform = transforms.Compose([
 def train_model():
     # --- 2. Datasets ---
     try:
+        #loads the training dataset
         train_ds = datasets.ImageFolder(
             os.path.join(DATASET_DIR, "train"),
             transform=train_transform
         )
+        #loads the testing dataset
         val_ds = datasets.ImageFolder(
             os.path.join(DATASET_DIR, "test"),
             transform=val_transform
         )
     except Exception as e:
-        print(f"❌ Error loading datasets. Check DATASET_DIR: {DATASET_DIR}")
+        print(f"Error loading datasets. Check DATASET_DIR: {DATASET_DIR}")
         print(f"Details: {e}")
         return
 
@@ -77,6 +82,7 @@ def train_model():
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
 
     # --- 3. Class Weights ---
+    # pay attention to the rare emotions (still does not work)
     labels = train_ds.targets
     class_counts = np.bincount(labels)
     total_samples = len(labels)
@@ -92,9 +98,11 @@ def train_model():
     print(f"Model moved to: {next(model.parameters()).device}")
 
     # Loss, Optimizer, and Scheduler
+    #criterion measures how wrong the model is, by using class weights
     criterion = nn.CrossEntropyLoss(weight=class_weights)
+    #optimizer used to reduce the error
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
-    # 🌟 FIX: Re-adding the Learning Rate Scheduler for better convergence
+    #start fast but slow down when getting closer to more accurate results
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
 
     # --- 5. Training Loop ---
@@ -106,12 +114,17 @@ def train_model():
         total, correct, epoch_loss = 0, 0, 0
 
         for batch_idx, (images, labels) in enumerate(train_loader):
+            # move images and labels to GPU so it can process them
             images, labels = images.to(DEVICE), labels.to(DEVICE)
-
+            #reset the previously learned info
             optimizer.zero_grad()
+            #the model outputs its guess
             outputs = model(images)
+            #check if the guess is correct by comparing it to the label
             loss = criterion(outputs, labels)
+            #go backward to see what neuron made this mistake
             loss.backward()
+            #try to correct the that mistake
             optimizer.step()
 
             epoch_loss += loss.item()
@@ -122,7 +135,7 @@ def train_model():
         train_acc = correct / total
         print(f"Epoch {epoch+1}/{EPOCHS} | Train Loss: {epoch_loss/len(train_loader):.4f} | Train Acc: {train_acc:.3f}")
 
-        # Validation
+        #Here we move to testing 
         model.eval()
         val_correct, val_total = 0, 0
         with torch.no_grad():
@@ -137,20 +150,18 @@ def train_model():
         val_acc = val_correct / val_total
         print(f"Validation Acc: {val_acc:.3f}")
 
-        # 🌟 FIX: Step the scheduler (adjust learning rate)
+        
         scheduler.step()
 
         # Save best model
         if val_acc > best_acc:
             best_acc = val_acc
-            # 🌟 FIX: Save to the correct filename to match the detector
             torch.save(model.state_dict(), "mobilenet_best_AffectNet.pth") 
-            print("💾 Saved new best model: mobilenet_best_AffectNet.pth!")
+            print(" Saved new best model: mobilenet_best_AffectNet.pth!")
 
     print("Training Done!")
 
-# -----------------------------------
-# 6. Safety Entry Point
-# -----------------------------------
+
+
 if __name__ == "__main__":
     train_model()

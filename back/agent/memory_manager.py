@@ -106,7 +106,7 @@ class MemoryManager:
         return "\n".join(summary)
     
     
-def log_emotional_event(self, emotion, confidence=1.0):
+    def log_emotional_event(self, emotion, confidence=1.0):
         """
         Logs a passive emotional observation (e.g., camera sees 'Sad' 
         but user hasn't said anything).
@@ -134,7 +134,7 @@ def log_emotional_event(self, emotion, confidence=1.0):
         self._write_json(self.emotion_log_path, log_data)
 
 
-def find_patterns(self):
+    def find_patterns(self):
         """
         Analyzes emotion_log.json to find simple triggers/patterns.
         Returns a string summary of findings.

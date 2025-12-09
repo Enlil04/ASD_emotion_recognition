@@ -56,6 +56,7 @@ def safe_crop(img, box):
     return img[y1:y2, x1:x2]
 
 # -------------- MEMORY FUNCTIONS -------------------
+#This file writes to the emotion_log.json
 def save_emotion_batch(entries):
     if not entries:
         return
@@ -81,7 +82,7 @@ def compute_baseline():
         if total > 0:
             baseline = {k: round(v/total, 3) for k,v in counts.items()}
             BASELINE_FILE.write_text(json.dumps(baseline, indent=2))
-            print(f"📊 Baseline Updated: {baseline}")
+            print(f"Baseline Updated: {baseline}")
     except Exception as e:
         print(f"Baseline error: {e}")
 
@@ -116,9 +117,9 @@ try:
     model.load_state_dict(state)
     model = model.to(DEVICE)
     model.eval()
-    print(f"✅ PyTorch MobileNetV3 model loaded. Input: {IN_H}x{IN_W}")
+    print(f" PyTorch MobileNetV3 model loaded. Input: {IN_H}x{IN_W}")
 except Exception as e:
-    print(f"❌ Error loading PyTorch model: {e}")
+    print(f" Error loading PyTorch model: {e}")
     raise SystemExit(1)
 
 # -------------------------
@@ -148,7 +149,7 @@ prev_time = time.time()
 frame_count = 0
 fps = 0.0
 
-print("🚀 AffectNet Hybrid System Running with PyTorch MobileNetV3...")
+print("AffectNet Hybrid System Running with PyTorch MobileNetV3...")
 
 while cap.isOpened():
     ret, frame = cap.read()
@@ -224,7 +225,7 @@ while cap.isOpened():
                             "confidence": round(conf, 4)
                         }
                         memory_buffer.append(entry)
-                        print(f"📝 Logged: {label}")
+                        print(f"Logged: {label}")
 
                         if len(memory_buffer) >= 4:
                             save_emotion_batch(memory_buffer)

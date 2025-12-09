@@ -38,7 +38,7 @@ class LlamaReasoner:
         # We handle "None" values gracefully so the LLM doesn't get confused.
         user_name = context_data.get('user_name', 'User')
         profile_triggers = ", ".join(context_data.get('triggers', [])) or "None known"
-        
+        #This is where the "Live Data" meets the "Static Instructions." It fills in the blanks with the data from the koog_orchestrator.
         full_prompt = f"""
         {system_instructions}
 
