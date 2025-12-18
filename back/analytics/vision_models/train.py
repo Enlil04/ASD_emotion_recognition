@@ -5,17 +5,15 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms, models
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.utils.class_weight import compute_class_weight
+
 import numpy as np
 import os
 
 # --- Configuration for Paths ---
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 ANALYTICS_DIR = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
-DATASET_DIR = os.path.join(
-    ANALYTICS_DIR,
-    "dataset",
-    "archive_clean"
-)
+DATASET_DIR = os.path.join(ANALYTICS_DIR,"dataset","archive_clean")
 
 # --- CONFIG ---
 IMG_SIZE = 224
@@ -36,19 +34,14 @@ train_transform = transforms.Compose([
     transforms.Resize((IMG_SIZE, IMG_SIZE)),
     transforms.RandomRotation(10), #might be to aggressive was 15 now 10
     transforms.RandomHorizontalFlip(),
-    transforms.ColorJitter(brightness=0.3, 
-        contrast=0.3, 
-        saturation=0.2, 
-        hue=0.05),
+    transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2, hue=0.05),
+
+    transforms.ToTensor(), # 1 convert to tensor
     # CRITICAL: Randomly erasing small parts forces the model to look at 
     # the whole face, not just one feature (like the mouth).
     # Great for when a hand covers part of the face.
-    transforms.RandomErasing(p=0.1, scale=(0.02, 0.1)),
-    transforms.ToTensor(),
-    transforms.Normalize(
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225]
-    )
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],std=[0.229, 0.224, 0.225]), # 2 normalize
+    transforms.RandomErasing(p=0.1, scale=(0.02, 0.1)), # 3 randomly erase small parts
 ])
 
 # cleans the images to make it like they came from camera
@@ -99,7 +92,6 @@ def train_model():
     # weights = np.sqrt(total_samples / (len(class_counts) * class_counts)) // tried this but made it worse
 
 #------------------------
-    from sklearn.utils.class_weight import compute_class_weight
     weights = compute_class_weight(
         class_weight='balanced',
         classes=np.unique(labels),
@@ -164,29 +156,37 @@ def train_model():
         all_preds = []
         all_labels = []
         val_correct, val_total = 0, 0
+        val_loss = 0.0
 
         with torch.no_grad():
             for images, labels_batch in val_loader:
                 images, labels_batch = images.to(DEVICE), labels_batch.to(DEVICE)
                 outputs = model(images)
+
+                loss = criterion(outputs, labels_batch)
+                val_loss += loss.item()
+
+                
                 _, preds = torch.max(outputs, 1)
                 
                 val_correct += (preds == labels_batch).sum().item()
                 val_total += labels_batch.size(0)
-                
+
                 all_preds.extend(preds.cpu().numpy())
                 all_labels.extend(labels_batch.cpu().numpy())
-
+                
         val_acc = val_correct / val_total
-        print(f"Validation Acc: {val_acc:.3f}")
+        avg_val_loss = val_loss / len(val_loader)
+        print(f"Validation Loss: {avg_val_loss:.4f} | Validation Acc: {val_acc:.3f}")
+
+       # val_acc = val_correct / val_total
+        #print(f"Validation Acc: {val_acc:.3f}")
 
         # Detailed metrics every 5 epochs
         if (epoch + 1) % 5 == 0:
             print("\n" + "="*60)
             print("PER-CLASS PERFORMANCE:")
-            print(classification_report(all_labels, all_preds, 
-                                       target_names=train_ds.classes,
-                                       zero_division=0))
+            print(classification_report(all_labels, all_preds, target_names=train_ds.classes, zero_division=0))
             print("="*60)
 
         scheduler.step()
