@@ -4,6 +4,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms, models
 from sklearn.utils.class_weight import compute_class_weight
+from sklearn.metrics import classification_report, confusion_matrix
 import numpy as np
 import os
 
@@ -19,7 +20,7 @@ DATASET_DIR = os.path.join(
 # --- CONFIG ---
 IMG_SIZE = 224
 BATCH_SIZE = 32
-EPOCHS = 30
+EPOCHS = 75
 NUM_CLASSES = 8
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print("Using device:", DEVICE)
@@ -33,9 +34,16 @@ if DEVICE == "cuda":
 # train_transform is for data augmentation
 train_transform = transforms.Compose([
     transforms.Resize((IMG_SIZE, IMG_SIZE)),
-    transforms.RandomRotation(15),
+    transforms.RandomRotation(10), #might be to aggressive was 15 now 10
     transforms.RandomHorizontalFlip(),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2),
+    transforms.ColorJitter(brightness=0.3, 
+        contrast=0.3, 
+        saturation=0.2, 
+        hue=0.05),
+    # CRITICAL: Randomly erasing small parts forces the model to look at 
+    # the whole face, not just one feature (like the mouth).
+    # Great for when a hand covers part of the face.
+    transforms.RandomErasing(p=0.1, scale=(0.02, 0.1)),
     transforms.ToTensor(),
     transforms.Normalize(
         mean=[0.485, 0.456, 0.406],
@@ -86,7 +94,19 @@ def train_model():
     labels = train_ds.targets
     class_counts = np.bincount(labels)
     total_samples = len(labels)
-    weights = np.sqrt(total_samples / (len(class_counts) * class_counts))
+
+
+    # weights = np.sqrt(total_samples / (len(class_counts) * class_counts)) // tried this but made it worse
+
+#------------------------
+    from sklearn.utils.class_weight import compute_class_weight
+    weights = compute_class_weight(
+        class_weight='balanced',
+        classes=np.unique(labels),
+        y=labels
+    )
+
+# ------------------------
     class_weights = torch.tensor(weights, dtype=torch.float).to(DEVICE)
     print("Class weights device:", class_weights.device)
 
@@ -101,7 +121,8 @@ def train_model():
     #criterion measures how wrong the model is, by using class weights
     criterion = nn.CrossEntropyLoss(weight=class_weights)
     #optimizer used to reduce the error
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    #  [CHANGED THIS ] optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
     #start fast but slow down when getting closer to more accurate results
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
 
@@ -135,33 +156,78 @@ def train_model():
         train_acc = correct / total
         print(f"Epoch {epoch+1}/{EPOCHS} | Train Loss: {epoch_loss/len(train_loader):.4f} | Train Acc: {train_acc:.3f}")
 
-        #Here we move to testing 
+
+
+
+        # Validation with detailed metrics
         model.eval()
+        all_preds = []
+        all_labels = []
         val_correct, val_total = 0, 0
+
         with torch.no_grad():
-            for images, labels in val_loader:
-                images, labels = images.to(DEVICE), labels.to(DEVICE)
-                
+            for images, labels_batch in val_loader:
+                images, labels_batch = images.to(DEVICE), labels_batch.to(DEVICE)
                 outputs = model(images)
                 _, preds = torch.max(outputs, 1)
-                val_correct += (preds == labels).sum().item()
-                val_total += labels.size(0)
+                
+                val_correct += (preds == labels_batch).sum().item()
+                val_total += labels_batch.size(0)
+                
+                all_preds.extend(preds.cpu().numpy())
+                all_labels.extend(labels_batch.cpu().numpy())
 
         val_acc = val_correct / val_total
         print(f"Validation Acc: {val_acc:.3f}")
 
-        
+        # Detailed metrics every 5 epochs
+        if (epoch + 1) % 5 == 0:
+            print("\n" + "="*60)
+            print("PER-CLASS PERFORMANCE:")
+            print(classification_report(all_labels, all_preds, 
+                                       target_names=train_ds.classes,
+                                       zero_division=0))
+            print("="*60)
+
         scheduler.step()
 
         # Save best model
         if val_acc > best_acc:
             best_acc = val_acc
-            torch.save(model.state_dict(), "mobilenet_best_AffectNet.pth") 
-            print(" Saved new best model: mobilenet_best_AffectNet.pth!")
+            torch.save(model.state_dict(), "mobilenet_best_AffectNet.pth")
+            print(f"✓ Saved new best model! Val Acc: {val_acc:.3f}")
 
-    print("Training Done!")
-
-
+    print("\nTraining Done! Best Validation Accuracy:", best_acc)
 
 if __name__ == "__main__":
     train_model()
+#         #Here we move to testing 
+#         model.eval()
+#         val_correct, val_total = 0, 0
+#         with torch.no_grad():
+#             for images, labels in val_loader:
+#                 images, labels = images.to(DEVICE), labels.to(DEVICE)
+                
+#                 outputs = model(images)
+#                 _, preds = torch.max(outputs, 1)
+#                 val_correct += (preds == labels).sum().item()
+#                 val_total += labels.size(0)
+
+#         val_acc = val_correct / val_total
+#         print(f"Validation Acc: {val_acc:.3f}")
+
+        
+#         scheduler.step()
+
+#         # Save best model
+#         if val_acc > best_acc:
+#             best_acc = val_acc
+#             torch.save(model.state_dict(), "mobilenet_best_AffectNet.pth") 
+#             print(" Saved new best model: mobilenet_best_AffectNet.pth!")
+
+#     print("Training Done!")
+
+
+
+# if __name__ == "__main__":
+#     train_model()
