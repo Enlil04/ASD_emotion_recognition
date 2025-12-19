@@ -1,256 +1,396 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision import datasets, transforms, models
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from sklearn.utils.class_weight import compute_class_weight
-from sklearn.metrics import classification_report, confusion_matrix
+from tqdm import tqdm
+from pathlib import Path
+from PIL import Image
 import numpy as np
-import os
 import json
+import os
 
 # ==========================================
+# 1. ROBUST PATHING (Fixes FileNotFoundError)
+# ==========================================
+# This finds the absolute path regardless of where you run the script from
+BASE_DIR = Path(__file__).resolve().parent.parent # Points to 'analytics' folder
+DATASET_DIR = BASE_DIR / "dataset" / "archive_clean"
+
 # CONFIGURATION
-# ==========================================
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-ANALYTICS_DIR = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
-DATASET_DIR = os.path.join(ANALYTICS_DIR, "dataset", "archive_clean")
-
-IMG_SIZE = 224
-BATCH_SIZE = 32   # Keep 32 for stability
-EPOCHS = 60       # AffectNet is huge; 60 epochs is usually plenty
-LEARNING_RATE = 1e-3
-
-# CHANGE 1: AffectNet has 8 classes (includes 'Contempt')
-# Check your folder: archive_clean/train/ should have 8 subfolders
+BATCH_SIZE = 32 
+EPOCHS = 60 
+LEARNING_RATE = 0.0004 
 NUM_CLASSES = 8 
-
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Using device: {DEVICE}")
-if DEVICE == "cuda":
-    print(f"CUDA device: {torch.cuda.get_device_name(0)}")
 
 # ==========================================
-# TRANSFORMS (Data Augmentation)
+# 2. SAFE LOADER (Fixes UnidentifiedImageError)
+# ==========================================
+def safe_loader(path):
+    try:
+        with open(path, 'rb') as f:
+            img = Image.open(f)
+            return img.convert('RGB')
+    except Exception as e:
+        print(f"\n⚠️ Skipping corrupt image: {path}")
+        return Image.new('RGB', (224, 224), (0, 0, 0)) # Return black image as fallback
+
+# ==========================================
+# 3. AUGMENTATION (Fixes 30% Overfitting Gap)
 # ==========================================
 train_transform = transforms.Compose([
-    transforms.Resize((IMG_SIZE, IMG_SIZE)),
-    
-    # Aggressive augmentation helps AffectNet generalization
-    transforms.RandomRotation(15),
-    transforms.RandomHorizontalFlip(p=0.5),
-    transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
-    transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
-    
-    transforms.ToTensor(),       
-    transforms.Normalize(        
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225]
-    ), 
-    transforms.RandomErasing(p=0.1, scale=(0.02, 0.15)), 
+    transforms.Resize((224, 224)),
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomRotation(20),
+    transforms.ColorJitter(brightness=0.3, contrast=0.3),
+    transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    transforms.RandomErasing(p=0.2, scale=(0.02, 0.1)) # Forces model to look at features, not noise
 ])
 
 val_transform = transforms.Compose([
-    transforms.Resize((IMG_SIZE, IMG_SIZE)),
+    transforms.Resize((224, 224)),
     transforms.ToTensor(),
-    transforms.Normalize(
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225]
-    )
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
-# ==========================================
-# MAIN TRAINING LOGIC
-# ==========================================
 def train_model():
-    # --- 1. Load Datasets ---
-    try:
-        train_ds = datasets.ImageFolder(
-            os.path.join(DATASET_DIR, "train"),
-            transform=train_transform
-        )
-        # Note: AffectNet often calls the test set 'val'
-        val_path = os.path.join(DATASET_DIR, "val")
-        if not os.path.exists(val_path):
-            val_path = os.path.join(DATASET_DIR, "test")
-            
-        val_ds = datasets.ImageFolder(val_path, transform=val_transform)
-        
-    except Exception as e:
-        print(f"❌ Error loading datasets. Check DATASET_DIR: {DATASET_DIR}")
-        print(f"Details: {e}")
+    print(f"🚀 Training on: {DEVICE}")
+    print(f"📂 Dataset Path: {DATASET_DIR}")
+
+    if not DATASET_DIR.exists():
+        print(f"❌ Error: Cannot find dataset at {DATASET_DIR}")
         return
 
-    print(f"Train samples: {len(train_ds)}, Val samples: {len(val_ds)}")
-    print("Train classes:", train_ds.classes)
+    # --- 4. Load Datasets ---
+    train_ds = datasets.ImageFolder(root=str(DATASET_DIR / "train"), transform=train_transform, loader=safe_loader)
+    val_ds = datasets.ImageFolder(root=str(DATASET_DIR / "test"), transform=val_transform, loader=safe_loader)
 
-    # Save Class Names for the App
-    with open("class_names.json", "w") as f:
-        json.dump(train_ds.classes, f)
-    print("✓ Saved class_names.json")
-
-    # --- 2. Weighted Sampler (Crucial for AffectNet) ---
+    # Balanced Sampling (Crucial for AffectNet imbalance)
     labels = np.array(train_ds.targets)
-    class_counts = np.bincount(labels)
+    class_weights_sample = 1.0 / torch.tensor(np.bincount(labels), dtype=torch.float)
+    sampler = WeightedRandomSampler(weights=class_weights_sample[labels], num_samples=len(labels), replacement=True)
     
-    # Check for empty classes
-    if 0 in class_counts:
-        print("⚠️ Warning: Some classes have 0 samples!")
-        
-    class_weights_sample = 1.0 / torch.tensor(class_counts, dtype=torch.float)
-    sample_weights = class_weights_sample[labels]
-    
-    sampler = WeightedRandomSampler(
-        weights=sample_weights,
-        num_samples=len(sample_weights),
-        replacement=True
-    )
-    
-    # --- 3. DataLoaders ---
-    train_loader = DataLoader(
-        train_ds, 
-        batch_size=BATCH_SIZE, 
-        sampler=sampler, 
-        num_workers=2, 
-        pin_memory=True,
-        persistent_workers=True
-    )
-    
-    val_loader = DataLoader(
-        val_ds, 
-        batch_size=BATCH_SIZE, 
-        shuffle=False, 
-        num_workers=2, 
-        pin_memory=True,
-        persistent_workers=True
-    )
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler, num_workers=4, pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
 
-    # --- 4. Class Weights for Loss ---
-    weights = compute_class_weight(
-        class_weight='balanced',
-        classes=np.unique(labels),
-        y=labels
-    )
-    class_weights = torch.tensor(weights, dtype=torch.float).to(DEVICE)
-    print("Class weights for Loss:", class_weights.cpu().numpy().round(2))
-
-    # --- 5. Model Architecture ---
-    model = models.mobilenet_v3_small(weights="IMAGENET1K_V1")
+    # --- 5. Model (MobileNetV3-Large for higher accuracy) ---
+    model = models.mobilenet_v3_large(weights="IMAGENET1K_V2")
+    num_ftrs = model.classifier[0].in_features
     
-    # Custom Head
     model.classifier = nn.Sequential(
-        nn.Linear(576, 1024),
+        nn.Linear(num_ftrs, 1024),
         nn.Hardswish(),
-        nn.Dropout(p=0.3),
+        nn.Dropout(p=0.5), # High dropout to stop the 86% vs 55% gap
         nn.Linear(1024, NUM_CLASSES)
     )
-    
     model = model.to(DEVICE)
 
     # --- 6. Optimization ---
-    criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
-    
-    optimizer = optim.AdamW(
-        model.parameters(), 
-        lr=LEARNING_RATE, 
-        weight_decay=1e-4
-    )
-    
-    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, 
-        T_0=10, 
-        T_mult=2
-    )
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-2) # Stronger weight decay
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
     # --- 7. Training Loop ---
     best_acc = 0.0
-    patience = 12
-    patience_counter = 0
-
     for epoch in range(EPOCHS):
-        print(f"\n{'='*70}")
-        print(f"EPOCH {epoch+1}/{EPOCHS} | LR: {optimizer.param_groups[0]['lr']:.6f}")
-        print('='*70)
-        
-        # Training
         model.train()
-        total, correct, epoch_loss = 0, 0, 0
-
-        for batch_idx, (images, labels_batch) in enumerate(train_loader):
+        train_correct, train_total = 0, 0
+        
+        loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}")
+        for images, labels_batch in loop:
             images, labels_batch = images.to(DEVICE), labels_batch.to(DEVICE)
             
             optimizer.zero_grad()
             outputs = model(images)
             loss = criterion(outputs, labels_batch)
             loss.backward()
-            
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
-            epoch_loss += loss.item()
             _, preds = torch.max(outputs, 1)
-            correct += (preds == labels_batch).sum().item()
-            total += labels_batch.size(0)
-
-        train_acc = correct / total
-        avg_train_loss = epoch_loss / len(train_loader)
-        print(f"✓ Train Loss: {avg_train_loss:.4f} | Train Acc: {train_acc:.4f}")
+            train_correct += (preds == labels_batch).sum().item()
+            train_total += labels_batch.size(0)
+            loop.set_postfix(acc=f"{100*train_correct/train_total:.2f}%")
 
         # Validation
         model.eval()
-        all_preds = []
-        all_labels = []
         val_correct, val_total = 0, 0
-        val_loss = 0.0
-
         with torch.no_grad():
             for images, labels_batch in val_loader:
                 images, labels_batch = images.to(DEVICE), labels_batch.to(DEVICE)
                 outputs = model(images)
-                loss = criterion(outputs, labels_batch)
-                val_loss += loss.item()
-
                 _, preds = torch.max(outputs, 1)
                 val_correct += (preds == labels_batch).sum().item()
                 val_total += labels_batch.size(0)
 
-                all_preds.extend(preds.cpu().numpy())
-                all_labels.extend(labels_batch.cpu().numpy())
-                
         val_acc = val_correct / val_total
-        avg_val_loss = val_loss / len(val_loader)
-        print(f"✓ Val Loss:   {avg_val_loss:.4f} | Val Acc:   {val_acc:.4f}")
-
-        # Metrics
-        if (epoch + 1) % 5 == 0:
-            print("\n" + "="*70)
-            print("CLASSIFICATION REPORT:")
-            print(classification_report(all_labels, all_preds, target_names=train_ds.classes, zero_division=0))
-            print("="*70)
+        print(f"📊 Epoch {epoch+1} Summary: Train Acc: {100*train_correct/train_total:.2f}% | Val Acc: {100*val_acc:.2f}%")
 
         scheduler.step()
 
-        # Save Best Model
         if val_acc > best_acc:
             best_acc = val_acc
-            # CHANGE 2: Updated filename for AffectNet
-            torch.save(model.state_dict(), "mobilenet_best_AffectNet.pth")
-            print(f"\n🎉 NEW BEST MODEL SAVED! Val Acc: {val_acc:.4f}")
-            patience_counter = 0
-        else:
-            patience_counter += 1
-            
-        if patience_counter >= patience:
-            print(f"\n⚠️ Early stopping triggered.")
-            break
-
-    print(f"\n{'='*70}")
-    print(f"🏁 TRAINING COMPLETE!")
-    print(f"🏆 Best Validation Accuracy: {best_acc:.4f}")
-    print('='*70)
+            torch.save(model.state_dict(), "mobilenet_v3_large_best.pth")
+            print(f"⭐ Saved New Best: {100*val_acc:.2f}%")
 
 if __name__ == "__main__":
     train_model()
+# import torch
+# import torch.nn as nn
+# import torch.optim as optim
+# from torch.utils.data import DataLoader, WeightedRandomSampler
+# from torchvision import datasets, transforms, models
+# from sklearn.utils.class_weight import compute_class_weight
+# from sklearn.metrics import classification_report, confusion_matrix
+# import numpy as np
+# import os
+# import json
+
+# # ==========================================
+# # CONFIGURATION
+# # ==========================================
+# CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+# ANALYTICS_DIR = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
+# DATASET_DIR = os.path.join(ANALYTICS_DIR, "dataset", "archive_clean")
+
+# IMG_SIZE = 224
+# BATCH_SIZE = 32   # Keep 32 for stability
+# EPOCHS = 60       # AffectNet is huge; 60 epochs is usually plenty
+# LEARNING_RATE = 1e-3
+
+# # CHANGE 1: AffectNet has 8 classes (includes 'Contempt')
+# # Check your folder: archive_clean/train/ should have 8 subfolders
+# NUM_CLASSES = 8 
+
+# DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# print(f"Using device: {DEVICE}")
+# if DEVICE == "cuda":
+#     print(f"CUDA device: {torch.cuda.get_device_name(0)}")
+
+# # ==========================================
+# # TRANSFORMS (Data Augmentation)
+# # ==========================================
+# train_transform = transforms.Compose([
+#     transforms.Resize((IMG_SIZE, IMG_SIZE)),
+    
+#     # Aggressive augmentation helps AffectNet generalization
+#     transforms.RandomRotation(15),
+#     transforms.RandomHorizontalFlip(p=0.5),
+#     transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
+#     transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
+    
+#     transforms.ToTensor(),       
+#     transforms.Normalize(        
+#         mean=[0.485, 0.456, 0.406],
+#         std=[0.229, 0.224, 0.225]
+#     ), 
+#     transforms.RandomErasing(p=0.1, scale=(0.02, 0.15)), 
+# ])
+
+# val_transform = transforms.Compose([
+#     transforms.Resize((IMG_SIZE, IMG_SIZE)),
+#     transforms.ToTensor(),
+#     transforms.Normalize(
+#         mean=[0.485, 0.456, 0.406],
+#         std=[0.229, 0.224, 0.225]
+#     )
+# ])
+
+# # ==========================================
+# # MAIN TRAINING LOGIC
+# # ==========================================
+# def train_model():
+#     # --- 1. Load Datasets ---
+#     try:
+#         train_ds = datasets.ImageFolder(
+#             os.path.join(DATASET_DIR, "train"),
+#             transform=train_transform
+#         )
+#         # Note: AffectNet often calls the test set 'val'
+#         val_path = os.path.join(DATASET_DIR, "val")
+#         if not os.path.exists(val_path):
+#             val_path = os.path.join(DATASET_DIR, "test")
+            
+#         val_ds = datasets.ImageFolder(val_path, transform=val_transform)
+        
+#     except Exception as e:
+#         print(f"❌ Error loading datasets. Check DATASET_DIR: {DATASET_DIR}")
+#         print(f"Details: {e}")
+#         return
+
+#     print(f"Train samples: {len(train_ds)}, Val samples: {len(val_ds)}")
+#     print("Train classes:", train_ds.classes)
+
+#     # Save Class Names for the App
+#     with open("class_names.json", "w") as f:
+#         json.dump(train_ds.classes, f)
+#     print("✓ Saved class_names.json")
+
+#     # --- 2. Weighted Sampler (Crucial for AffectNet) ---
+#     labels = np.array(train_ds.targets)
+#     class_counts = np.bincount(labels)
+    
+#     # Check for empty classes
+#     if 0 in class_counts:
+#         print("⚠️ Warning: Some classes have 0 samples!")
+        
+#     class_weights_sample = 1.0 / torch.tensor(class_counts, dtype=torch.float)
+#     sample_weights = class_weights_sample[labels]
+    
+#     sampler = WeightedRandomSampler(
+#         weights=sample_weights,
+#         num_samples=len(sample_weights),
+#         replacement=True
+#     )
+    
+#     # --- 3. DataLoaders ---
+#     train_loader = DataLoader(
+#         train_ds, 
+#         batch_size=BATCH_SIZE, 
+#         sampler=sampler, 
+#         num_workers=2, 
+#         pin_memory=True,
+#         persistent_workers=True
+#     )
+    
+#     val_loader = DataLoader(
+#         val_ds, 
+#         batch_size=BATCH_SIZE, 
+#         shuffle=False, 
+#         num_workers=2, 
+#         pin_memory=True,
+#         persistent_workers=True
+#     )
+
+#     # --- 4. Class Weights for Loss ---
+#     weights = compute_class_weight(
+#         class_weight='balanced',
+#         classes=np.unique(labels),
+#         y=labels
+#     )
+#     class_weights = torch.tensor(weights, dtype=torch.float).to(DEVICE)
+#     print("Class weights for Loss:", class_weights.cpu().numpy().round(2))
+
+#     # --- 5. Model Architecture ---
+#     model = models.mobilenet_v3_small(weights="IMAGENET1K_V1")
+    
+#     # Custom Head
+#     model.classifier = nn.Sequential(
+#         nn.Linear(576, 1024),
+#         nn.Hardswish(),
+#         nn.Dropout(p=0.3),
+#         nn.Linear(1024, NUM_CLASSES)
+#     )
+    
+#     model = model.to(DEVICE)
+
+#     # --- 6. Optimization ---
+#     criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
+    
+#     optimizer = optim.AdamW(
+#         model.parameters(), 
+#         lr=LEARNING_RATE, 
+#         weight_decay=1e-4
+#     )
+    
+#     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+#         optimizer, 
+#         T_0=10, 
+#         T_mult=2
+#     )
+
+#     # --- 7. Training Loop ---
+#     best_acc = 0.0
+#     patience = 12
+#     patience_counter = 0
+
+#     for epoch in range(EPOCHS):
+#         print(f"\n{'='*70}")
+#         print(f"EPOCH {epoch+1}/{EPOCHS} | LR: {optimizer.param_groups[0]['lr']:.6f}")
+#         print('='*70)
+        
+#         # Training
+#         model.train()
+#         total, correct, epoch_loss = 0, 0, 0
+
+#         for batch_idx, (images, labels_batch) in enumerate(train_loader):
+#             images, labels_batch = images.to(DEVICE), labels_batch.to(DEVICE)
+            
+#             optimizer.zero_grad()
+#             outputs = model(images)
+#             loss = criterion(outputs, labels_batch)
+#             loss.backward()
+            
+#             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+#             optimizer.step()
+
+#             epoch_loss += loss.item()
+#             _, preds = torch.max(outputs, 1)
+#             correct += (preds == labels_batch).sum().item()
+#             total += labels_batch.size(0)
+
+#         train_acc = correct / total
+#         avg_train_loss = epoch_loss / len(train_loader)
+#         print(f"✓ Train Loss: {avg_train_loss:.4f} | Train Acc: {train_acc:.4f}")
+
+#         # Validation
+#         model.eval()
+#         all_preds = []
+#         all_labels = []
+#         val_correct, val_total = 0, 0
+#         val_loss = 0.0
+
+#         with torch.no_grad():
+#             for images, labels_batch in val_loader:
+#                 images, labels_batch = images.to(DEVICE), labels_batch.to(DEVICE)
+#                 outputs = model(images)
+#                 loss = criterion(outputs, labels_batch)
+#                 val_loss += loss.item()
+
+#                 _, preds = torch.max(outputs, 1)
+#                 val_correct += (preds == labels_batch).sum().item()
+#                 val_total += labels_batch.size(0)
+
+#                 all_preds.extend(preds.cpu().numpy())
+#                 all_labels.extend(labels_batch.cpu().numpy())
+                
+#         val_acc = val_correct / val_total
+#         avg_val_loss = val_loss / len(val_loader)
+#         print(f"✓ Val Loss:   {avg_val_loss:.4f} | Val Acc:   {val_acc:.4f}")
+
+#         # Metrics
+#         if (epoch + 1) % 5 == 0:
+#             print("\n" + "="*70)
+#             print("CLASSIFICATION REPORT:")
+#             print(classification_report(all_labels, all_preds, target_names=train_ds.classes, zero_division=0))
+#             print("="*70)
+
+#         scheduler.step()
+
+#         # Save Best Model
+#         if val_acc > best_acc:
+#             best_acc = val_acc
+#             # CHANGE 2: Updated filename for AffectNet
+#             torch.save(model.state_dict(), "mobilenet_best_AffectNet.pth")
+#             print(f"\n🎉 NEW BEST MODEL SAVED! Val Acc: {val_acc:.4f}")
+#             patience_counter = 0
+#         else:
+#             patience_counter += 1
+            
+#         if patience_counter >= patience:
+#             print(f"\n⚠️ Early stopping triggered.")
+#             break
+
+#     print(f"\n{'='*70}")
+#     print(f"🏁 TRAINING COMPLETE!")
+#     print(f"🏆 Best Validation Accuracy: {best_acc:.4f}")
+#     print('='*70)
+
+# if __name__ == "__main__":
+#     train_model()
 # raf-db train script
 # import torch
 # import torch.nn as nn

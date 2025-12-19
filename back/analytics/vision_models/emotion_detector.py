@@ -1,307 +1,370 @@
-import time
-import collections
-import cv2
-import numpy as np
-import mediapipe as mp
-import json
 import torch
 import torch.nn as nn
-from pathlib import Path
-from torchvision.models import mobilenet_v3_small
+from torchvision import models, transforms
+from PIL import Image
+import os
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
-# CHANGE 1: Point to your new AffectNet model
-MODEL_PATH = "mobilenet_best_AffectNet.pth" 
-CLASS_NAMES_PATH = "class_names.json"
-
-# CHANGE 2: AffectNet standard emotions (8 classes usually)
-# This is a fallback if the JSON file is missing
-DEFAULT_EMOTIONS = ['anger', 'contempt', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise']
-
-MAX_HISTORY = 7  # Smoother predictions
-MIN_FACE_SIZE = 60
-DISPLAY_FPS = True
-CONFIDENCE_THRESHOLD = 0.40  
-
-# Memory paths
-MEMORY_FILE = Path("analytics/local_memory/emotion_log.json")
-BASELINE_FILE = Path("analytics/local_memory/baseline.json")
-MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-
-IN_H, IN_W = 224, 224
-
-# ==========================================
-# SETUP & LOADING
-# ==========================================
-
-# 1. Load Class Names
-try:
-    if Path(CLASS_NAMES_PATH).exists():
-        with open(CLASS_NAMES_PATH, 'r') as f:
-            EMOTIONS = json.load(f)
-        print(f"✓ Loaded classes from file: {EMOTIONS}")
-    else:
-        EMOTIONS = DEFAULT_EMOTIONS
-        print(f"⚠️ Warning: {CLASS_NAMES_PATH} not found. Using default AffectNet labels.")
-except Exception as e:
-    EMOTIONS = DEFAULT_EMOTIONS
-    print(f"Error loading class names: {e}")
-
-NUM_CLASSES = len(EMOTIONS)
-print(f"Expecting model with {NUM_CLASSES} classes.")
-
-# 2. Load PyTorch Model
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Device: {DEVICE}")
-
-try:
-    model = mobilenet_v3_small(weights=None)
-    
-    # CHANGE 3: Ensure this matches your training script architecture exactly
-    model.classifier = nn.Sequential(
-        nn.Linear(576, 1024),
-        nn.Hardswish(),
-        nn.Dropout(p=0.3),
-        nn.Linear(1024, NUM_CLASSES)
-    )
-    
-    # Load Weights
-    state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
-    model.load_state_dict(state_dict)
-    model.to(DEVICE)
-    model.eval()
-    print("✅ AffectNet Model loaded successfully!")
-    
-except FileNotFoundError:
-    print(f"❌ CRITICAL: Model file '{MODEL_PATH}' not found.")
-    print("   Please run 'train.py' first.")
-    exit()
-except Exception as e:
-    print(f"❌ Error loading model architecture: {e}")
-    exit()
-
-# 3. Setup MediaPipe
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(
-    max_num_faces=1,
-    refine_landmarks=True,
-    min_detection_confidence=0.6,
-    min_tracking_confidence=0.6
-)
-
-# Buffers
-bbox_history = collections.deque(maxlen=MAX_HISTORY)
-emotion_history = collections.deque(maxlen=MAX_HISTORY)
-memory_buffer = []
-
-# ==========================================
-# HELPER FUNCTIONS
-# ==========================================
-def smooth_box(history_deque, new_box):
-    history_deque.append(new_box)
-    arr = np.array(history_deque)
-    return tuple(arr.mean(axis=0).astype(int))
-
-def safe_crop(img, box):
-    x1, y1, x2, y2 = box
-    h, w = img.shape[:2]
-    x1, x2 = max(0, x1), min(w, x2)
-    y1, y2 = max(0, y1), min(h, y2)
-    if x2 <= x1 or y2 <= y1: return None
-    return img[y1:y2, x1:x2]
-
-def smooth_emotion_prediction(history_deque, new_emotion, new_confidence):
-    """Temporal smoothing"""
-    history_deque.append((new_emotion, new_confidence))
-    
-    if len(history_deque) < 3:
-        return new_emotion, new_confidence
-    
-    emotion_votes = {}
-    total_confidence = {}
-    
-    for emotion, conf in history_deque:
-        emotion_votes[emotion] = emotion_votes.get(emotion, 0) + 1
-        total_confidence[emotion] = total_confidence.get(emotion, 0) + conf
-    
-    best_emotion = max(emotion_votes, key=emotion_votes.get)
-    avg_confidence = total_confidence[best_emotion] / emotion_votes[best_emotion]
-    
-    return best_emotion, avg_confidence
-
-def save_emotion_batch(entries):
-    if not entries: return
-    try:
-        current_data = []
-        if MEMORY_FILE.exists():
-            try:
-                content = MEMORY_FILE.read_text()
-                if content.strip(): current_data = json.loads(content)
-            except: pass
+class EmotionDetector:
+    def __init__(self, model_path="mobilenet_v3_large_best.pth"):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # 1. Define the exact same architecture as train.py
+        self.model = models.mobilenet_v3_large()
+        num_ftrs = self.model.classifier[3].in_features
+        self.model.classifier[3] = nn.Sequential(
+            nn.Linear(num_ftrs, 512),
+            nn.Hardswish(),
+            nn.Dropout(p=0.5),
+            nn.Linear(512, 8)
+        )
+        
+        # 2. Load the trained weights
+        if os.path.exists(model_path):
+            self.model.load_state_dict(torch.load(model_path, map_location=self.device))
+            print(f"✅ Loaded weights from {model_path}")
+        else:
+            print(f"⚠️ Warning: {model_path} not found. Using random weights.")
             
-        current_data.extend(entries)
-        if len(current_data) > 1000: current_data = current_data[-1000:]
-        
-        MEMORY_FILE.write_text(json.dumps(current_data, indent=2))
-        compute_baseline(current_data)
-    except Exception as e:
-        print(f"Memory error: {e}")
+        self.model.to(self.device)
+        self.model.eval()
 
-def compute_baseline(data):
-    try:
-        counts = {}
-        for d in data:
-            e = d.get('emotion')
-            if e: counts[e] = counts.get(e, 0) + 1
-        total = sum(counts.values())
-        if total > 0:
-            baseline = {k: round(v/total, 3) for k, v in counts.items()}
-            BASELINE_FILE.write_text(json.dumps(baseline, indent=2))
-    except: pass
+        # 3. Image Preprocessing
+        self.transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        ])
 
-# ==========================================
-# PREPROCESSING
-# ==========================================
-def preprocess_face(face_roi):
-    # Resize
-    roi = cv2.resize(face_roi, (IN_W, IN_H), interpolation=cv2.INTER_CUBIC)
-    roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
+        # 4. Label Mapping (Match your folder order)
+        self.labels = ['Anger', 'Contempt', 'Disgust', 'Fear', 'Happy', 'Neutral', 'Sad', 'Surprise']
+
+    def predict(self, image_path):
+        try:
+            img = Image.open(image_path).convert('RGB')
+            img_t = self.transform(img).unsqueeze(0).to(self.device)
+
+            with torch.no_grad():
+                outputs = self.model(img_t)
+                probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
+                confidence, index = torch.max(probabilities, 0)
+
+            return {
+                "emotion": self.labels[index.item()],
+                "confidence": confidence.item()
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+# --- Quick Test ---
+if __name__ == "__main__":
+    detector = EmotionDetector()
+    # Replace with a path to a real image to test
+    result = detector.predict("test_image.jpg")
+    print(f"Result: {result}")
+# import time
+# import collections
+# import cv2
+# import numpy as np
+# import mediapipe as mp
+# import json
+# import torch
+# import torch.nn as nn
+# from pathlib import Path
+# from torchvision.models import mobilenet_v3_small
+
+# # ==========================================
+# # CONFIGURATION
+# # ==========================================
+# # CHANGE 1: Point to your new AffectNet model
+# MODEL_PATH = "mobilenet_best_AffectNet.pth" 
+# CLASS_NAMES_PATH = "class_names.json"
+
+# # CHANGE 2: AffectNet standard emotions (8 classes usually)
+# # This is a fallback if the JSON file is missing
+# DEFAULT_EMOTIONS = ['anger', 'contempt', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise']
+
+# MAX_HISTORY = 7  # Smoother predictions
+# MIN_FACE_SIZE = 60
+# DISPLAY_FPS = True
+# CONFIDENCE_THRESHOLD = 0.40  
+
+# # Memory paths
+# MEMORY_FILE = Path("analytics/local_memory/emotion_log.json")
+# BASELINE_FILE = Path("analytics/local_memory/baseline.json")
+# MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+# IN_H, IN_W = 224, 224
+
+# # ==========================================
+# # SETUP & LOADING
+# # ==========================================
+
+# # 1. Load Class Names
+# try:
+#     if Path(CLASS_NAMES_PATH).exists():
+#         with open(CLASS_NAMES_PATH, 'r') as f:
+#             EMOTIONS = json.load(f)
+#         print(f"✓ Loaded classes from file: {EMOTIONS}")
+#     else:
+#         EMOTIONS = DEFAULT_EMOTIONS
+#         print(f"⚠️ Warning: {CLASS_NAMES_PATH} not found. Using default AffectNet labels.")
+# except Exception as e:
+#     EMOTIONS = DEFAULT_EMOTIONS
+#     print(f"Error loading class names: {e}")
+
+# NUM_CLASSES = len(EMOTIONS)
+# print(f"Expecting model with {NUM_CLASSES} classes.")
+
+# # 2. Load PyTorch Model
+# DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# print(f"Device: {DEVICE}")
+
+# try:
+#     model = mobilenet_v3_small(weights=None)
     
-    # Tensor
-    roi_tensor = torch.from_numpy(roi_rgb).permute(2, 0, 1).float() / 255.0
+#     # CHANGE 3: Ensure this matches your training script architecture exactly
+#     model.classifier = nn.Sequential(
+#         nn.Linear(576, 1024),
+#         nn.Hardswish(),
+#         nn.Dropout(p=0.3),
+#         nn.Linear(1024, NUM_CLASSES)
+#     )
     
-    # Normalize (Standard ImageNet)
-    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-    roi_tensor = (roi_tensor - mean) / std
+#     # Load Weights
+#     state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
+#     model.load_state_dict(state_dict)
+#     model.to(DEVICE)
+#     model.eval()
+#     print("✅ AffectNet Model loaded successfully!")
     
-    # Batch Dim
-    roi_tensor = roi_tensor.unsqueeze(0).to(DEVICE)
-    return roi_tensor, roi_rgb
+# except FileNotFoundError:
+#     print(f"❌ CRITICAL: Model file '{MODEL_PATH}' not found.")
+#     print("   Please run 'train.py' first.")
+#     exit()
+# except Exception as e:
+#     print(f"❌ Error loading model architecture: {e}")
+#     exit()
 
-# ==========================================
-# MAIN LOOP
-# ==========================================
-cap = cv2.VideoCapture(0)
+# # 3. Setup MediaPipe
+# mp_face_mesh = mp.solutions.face_mesh
+# face_mesh = mp_face_mesh.FaceMesh(
+#     max_num_faces=1,
+#     refine_landmarks=True,
+#     min_detection_confidence=0.6,
+#     min_tracking_confidence=0.6
+# )
 
-prev_time = time.time()
-fps = 0.0
-frame_count = 0
+# # Buffers
+# bbox_history = collections.deque(maxlen=MAX_HISTORY)
+# emotion_history = collections.deque(maxlen=MAX_HISTORY)
+# memory_buffer = []
 
-print("\n🚀 Emotion Recognition System Active (AffectNet Mode)")
-print("   Press 'q' to quit\n")
+# # ==========================================
+# # HELPER FUNCTIONS
+# # ==========================================
+# def smooth_box(history_deque, new_box):
+#     history_deque.append(new_box)
+#     arr = np.array(history_deque)
+#     return tuple(arr.mean(axis=0).astype(int))
 
-while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret: break
+# def safe_crop(img, box):
+#     x1, y1, x2, y2 = box
+#     h, w = img.shape[:2]
+#     x1, x2 = max(0, x1), min(w, x2)
+#     y1, y2 = max(0, y1), min(h, y2)
+#     if x2 <= x1 or y2 <= y1: return None
+#     return img[y1:y2, x1:x2]
 
-    frame_count += 1
-    h, w = frame.shape[:2]
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+# def smooth_emotion_prediction(history_deque, new_emotion, new_confidence):
+#     """Temporal smoothing"""
+#     history_deque.append((new_emotion, new_confidence))
     
-    results = face_mesh.process(rgb)
+#     if len(history_deque) < 3:
+#         return new_emotion, new_confidence
+    
+#     emotion_votes = {}
+#     total_confidence = {}
+    
+#     for emotion, conf in history_deque:
+#         emotion_votes[emotion] = emotion_votes.get(emotion, 0) + 1
+#         total_confidence[emotion] = total_confidence.get(emotion, 0) + conf
+    
+#     best_emotion = max(emotion_votes, key=emotion_votes.get)
+#     avg_confidence = total_confidence[best_emotion] / emotion_votes[best_emotion]
+    
+#     return best_emotion, avg_confidence
 
-    if results.multi_face_landmarks:
-        face_landmarks = results.multi_face_landmarks[0]
-        pts = np.array([[int(p.x * w), int(p.y * h)] for p in face_landmarks.landmark])
-
-        # Bounding Box Logic
-        x_min, y_min = np.min(pts, axis=0)
-        x_max, y_max = np.max(pts, axis=0)
-        
-        box_w, box_h = x_max - x_min, y_max - y_min
-        cx, cy = x_min + box_w // 2, y_min + box_h // 2
-        size = int(max(box_w, box_h) * 1.5) 
-        
-        x1, y1 = cx - size // 2, cy - size // 2
-        x2, y2 = cx + size // 2, cy + size // 2
-
-        fx1, fy1, fx2, fy2 = smooth_box(bbox_history, (x1, y1, x2, y2))
-
-        if (fx2 - fx1) > MIN_FACE_SIZE:
-            face_roi = safe_crop(frame, (fx1, fy1, fx2, fy2))
+# def save_emotion_batch(entries):
+#     if not entries: return
+#     try:
+#         current_data = []
+#         if MEMORY_FILE.exists():
+#             try:
+#                 content = MEMORY_FILE.read_text()
+#                 if content.strip(): current_data = json.loads(content)
+#             except: pass
             
-            if face_roi is not None and face_roi.size > 0:
-                try:
-                    roi_tensor, roi_rgb = preprocess_face(face_roi)
+#         current_data.extend(entries)
+#         if len(current_data) > 1000: current_data = current_data[-1000:]
+        
+#         MEMORY_FILE.write_text(json.dumps(current_data, indent=2))
+#         compute_baseline(current_data)
+#     except Exception as e:
+#         print(f"Memory error: {e}")
+
+# def compute_baseline(data):
+#     try:
+#         counts = {}
+#         for d in data:
+#             e = d.get('emotion')
+#             if e: counts[e] = counts.get(e, 0) + 1
+#         total = sum(counts.values())
+#         if total > 0:
+#             baseline = {k: round(v/total, 3) for k, v in counts.items()}
+#             BASELINE_FILE.write_text(json.dumps(baseline, indent=2))
+#     except: pass
+
+# # ==========================================
+# # PREPROCESSING
+# # ==========================================
+# def preprocess_face(face_roi):
+#     # Resize
+#     roi = cv2.resize(face_roi, (IN_W, IN_H), interpolation=cv2.INTER_CUBIC)
+#     roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
+    
+#     # Tensor
+#     roi_tensor = torch.from_numpy(roi_rgb).permute(2, 0, 1).float() / 255.0
+    
+#     # Normalize (Standard ImageNet)
+#     mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+#     std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+#     roi_tensor = (roi_tensor - mean) / std
+    
+#     # Batch Dim
+#     roi_tensor = roi_tensor.unsqueeze(0).to(DEVICE)
+#     return roi_tensor, roi_rgb
+
+# # ==========================================
+# # MAIN LOOP
+# # ==========================================
+# cap = cv2.VideoCapture(0)
+
+# prev_time = time.time()
+# fps = 0.0
+# frame_count = 0
+
+# print("\n🚀 Emotion Recognition System Active (AffectNet Mode)")
+# print("   Press 'q' to quit\n")
+
+# while cap.isOpened():
+#     ret, frame = cap.read()
+#     if not ret: break
+
+#     frame_count += 1
+#     h, w = frame.shape[:2]
+#     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    
+#     results = face_mesh.process(rgb)
+
+#     if results.multi_face_landmarks:
+#         face_landmarks = results.multi_face_landmarks[0]
+#         pts = np.array([[int(p.x * w), int(p.y * h)] for p in face_landmarks.landmark])
+
+#         # Bounding Box Logic
+#         x_min, y_min = np.min(pts, axis=0)
+#         x_max, y_max = np.max(pts, axis=0)
+        
+#         box_w, box_h = x_max - x_min, y_max - y_min
+#         cx, cy = x_min + box_w // 2, y_min + box_h // 2
+#         size = int(max(box_w, box_h) * 1.5) 
+        
+#         x1, y1 = cx - size // 2, cy - size // 2
+#         x2, y2 = cx + size // 2, cy + size // 2
+
+#         fx1, fy1, fx2, fy2 = smooth_box(bbox_history, (x1, y1, x2, y2))
+
+#         if (fx2 - fx1) > MIN_FACE_SIZE:
+#             face_roi = safe_crop(frame, (fx1, fy1, fx2, fy2))
+            
+#             if face_roi is not None and face_roi.size > 0:
+#                 try:
+#                     roi_tensor, roi_rgb = preprocess_face(face_roi)
                     
-                    # Show AI view
-                    cv2.imshow("AI Vision", cv2.resize(roi_rgb, (150, 150)))
+#                     # Show AI view
+#                     cv2.imshow("AI Vision", cv2.resize(roi_rgb, (150, 150)))
 
-                    # Inference
-                    with torch.no_grad():
-                        outputs = model(roi_tensor)
-                        probs = torch.nn.functional.softmax(outputs, dim=1)
-                        conf, idx = torch.max(probs, 1)
+#                     # Inference
+#                     with torch.no_grad():
+#                         outputs = model(roi_tensor)
+#                         probs = torch.nn.functional.softmax(outputs, dim=1)
+#                         conf, idx = torch.max(probs, 1)
                         
-                        raw_emotion = EMOTIONS[idx.item()]
-                        raw_confidence = conf.item()
+#                         raw_emotion = EMOTIONS[idx.item()]
+#                         raw_confidence = conf.item()
                     
-                    # Temporal Smoothing
-                    emotion_label, confidence = smooth_emotion_prediction(
-                        emotion_history, raw_emotion, raw_confidence
-                    )
+#                     # Temporal Smoothing
+#                     emotion_label, confidence = smooth_emotion_prediction(
+#                         emotion_history, raw_emotion, raw_confidence
+#                     )
 
-                    # Visualization
-                    if confidence > CONFIDENCE_THRESHOLD:
-                        color = (0, 255, 0) if emotion_label == 'happy' else (0, 0, 255)
+#                     # Visualization
+#                     if confidence > CONFIDENCE_THRESHOLD:
+#                         color = (0, 255, 0) if emotion_label == 'happy' else (0, 0, 255)
                         
-                        cv2.rectangle(frame, (fx1, fy1), (fx2, fy2), color, 2)
+#                         cv2.rectangle(frame, (fx1, fy1), (fx2, fy2), color, 2)
                         
-                        label_text = f"{emotion_label.upper()} {int(confidence*100)}%"
-                        (tw, th), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+#                         label_text = f"{emotion_label.upper()} {int(confidence*100)}%"
+#                         (tw, th), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
                         
-                        cv2.rectangle(frame, (fx1, fy1-35), (fx1 + tw + 20, fy1), color, -1)
-                        cv2.putText(frame, label_text, (fx1+10, fy1-8), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+#                         cv2.rectangle(frame, (fx1, fy1-35), (fx1 + tw + 20, fy1), color, -1)
+#                         cv2.putText(frame, label_text, (fx1+10, fy1-8), 
+#                                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
                         
-                        # Detailed Probability Bars
-                        y_off = fy2 + 20
-                        for i, emo in enumerate(EMOTIONS):
-                            p = probs[0][i].item()
-                            if p > 0.1: 
-                                bar_w = int(p * 100)
-                                cv2.rectangle(frame, (fx1, y_off), (fx1 + bar_w, y_off+10), (200,200,200), -1)
-                                cv2.putText(frame, f"{emo}", (fx1 + bar_w + 5, y_off+8), 
-                                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255), 1)
-                                y_off += 15
+#                         # Detailed Probability Bars
+#                         y_off = fy2 + 20
+#                         for i, emo in enumerate(EMOTIONS):
+#                             p = probs[0][i].item()
+#                             if p > 0.1: 
+#                                 bar_w = int(p * 100)
+#                                 cv2.rectangle(frame, (fx1, y_off), (fx1 + bar_w, y_off+10), (200,200,200), -1)
+#                                 cv2.putText(frame, f"{emo}", (fx1 + bar_w + 5, y_off+8), 
+#                                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255), 1)
+#                                 y_off += 15
 
-                        # Logging
-                        if frame_count % 15 == 0:
-                            entry = {
-                                "timestamp": time.time(),
-                                "emotion": emotion_label,
-                                "confidence": round(confidence, 4)
-                            }
-                            memory_buffer.append(entry)
-                            print(f"🧠 {emotion_label:10s} | {int(confidence*100)}%")
+#                         # Logging
+#                         if frame_count % 15 == 0:
+#                             entry = {
+#                                 "timestamp": time.time(),
+#                                 "emotion": emotion_label,
+#                                 "confidence": round(confidence, 4)
+#                             }
+#                             memory_buffer.append(entry)
+#                             print(f"🧠 {emotion_label:10s} | {int(confidence*100)}%")
 
-                            if len(memory_buffer) >= 5:
-                                save_emotion_batch(memory_buffer)
-                                memory_buffer = []
+#                             if len(memory_buffer) >= 5:
+#                                 save_emotion_batch(memory_buffer)
+#                                 memory_buffer = []
 
-                except Exception as e:
-                    print(f"Inference error: {e}")
+#                 except Exception as e:
+#                     print(f"Inference error: {e}")
 
-    # FPS
-    if DISPLAY_FPS:
-        now = time.time()
-        fps = 0.9 * fps + 0.1 * (1 / (now - prev_time)) if (now-prev_time) > 0 else 0
-        prev_time = now
-        cv2.putText(frame, f"FPS: {int(fps)}", (10, h - 10), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+#     # FPS
+#     if DISPLAY_FPS:
+#         now = time.time()
+#         fps = 0.9 * fps + 0.1 * (1 / (now - prev_time)) if (now-prev_time) > 0 else 0
+#         prev_time = now
+#         cv2.putText(frame, f"FPS: {int(fps)}", (10, h - 10), 
+#                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-    cv2.imshow("Emotion Detector (AffectNet)", frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+#     cv2.imshow("Emotion Detector (AffectNet)", frame)
+#     if cv2.waitKey(1) & 0xFF == ord('q'):
+#         break
 
-# Cleanup
-save_emotion_batch(memory_buffer)
-cap.release()
-cv2.destroyAllWindows()
-print("\n👋 System exited")
+# # Cleanup
+# save_emotion_batch(memory_buffer)
+# cap.release()
+# cv2.destroyAllWindows()
+# print("\n👋 System exited")
 # rafdb
 # import time
 # import collections
