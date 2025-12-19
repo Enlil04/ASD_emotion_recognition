@@ -1,48 +1,53 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, WeightedRandomSampler  # <--- Added Sampler
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision import datasets, transforms, models
 from sklearn.utils.class_weight import compute_class_weight
-from sklearn.metrics import classification_report, confusion_matrix # <--- Added Matrix
+from sklearn.metrics import classification_report, confusion_matrix
 import numpy as np
 import os
 import json
 
-# --- Configuration for Paths ---
+# ==========================================
+# CONFIGURATION
+# ==========================================
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 ANALYTICS_DIR = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
 DATASET_DIR = os.path.join(ANALYTICS_DIR, "dataset", "archive_clean")
 
-# --- CONFIG ---
 IMG_SIZE = 224
-BATCH_SIZE = 32   # Reduced slightly for stability
-EPOCHS = 75       # RAF-DB converges faster than FER
-LEARNING_RATE = 1e-3 # <--- Defined this
-NUM_CLASSES = 7 
+BATCH_SIZE = 32   # Keep 32 for stability
+EPOCHS = 60       # AffectNet is huge; 60 epochs is usually plenty
+LEARNING_RATE = 1e-3
+
+# CHANGE 1: AffectNet has 8 classes (includes 'Contempt')
+# Check your folder: archive_clean/train/ should have 8 subfolders
+NUM_CLASSES = 8 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {DEVICE}")
 if DEVICE == "cuda":
     print(f"CUDA device: {torch.cuda.get_device_name(0)}")
 
-# -----------------------------------
-# 1. Transforms (Tailored for RAF-DB)
-# -----------------------------------
-# RAF-DB is high quality, so we use "Medium-High" augmentation
+# ==========================================
+# TRANSFORMS (Data Augmentation)
+# ==========================================
 train_transform = transforms.Compose([
     transforms.Resize((IMG_SIZE, IMG_SIZE)),
+    
+    # Aggressive augmentation helps AffectNet generalization
     transforms.RandomRotation(15),
     transforms.RandomHorizontalFlip(p=0.5),
     transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
     transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
     
-    transforms.ToTensor(),       # 1. Convert Image to Tensor
-    transforms.Normalize(        # 2. Normalize
+    transforms.ToTensor(),       
+    transforms.Normalize(        
         mean=[0.485, 0.456, 0.406],
         std=[0.229, 0.224, 0.225]
     ), 
-    transforms.RandomErasing(p=0.1, scale=(0.02, 0.15)), # 3. Random Erasing
+    transforms.RandomErasing(p=0.1, scale=(0.02, 0.15)), 
 ])
 
 val_transform = transforms.Compose([
@@ -54,20 +59,23 @@ val_transform = transforms.Compose([
     )
 ])
 
-# -----------------------------------
-# 2. Main Logic Function
-# -----------------------------------
+# ==========================================
+# MAIN TRAINING LOGIC
+# ==========================================
 def train_model():
-    # --- Datasets ---
+    # --- 1. Load Datasets ---
     try:
         train_ds = datasets.ImageFolder(
             os.path.join(DATASET_DIR, "train"),
             transform=train_transform
         )
-        val_ds = datasets.ImageFolder(
-            os.path.join(DATASET_DIR, "test"),
-            transform=val_transform
-        )
+        # Note: AffectNet often calls the test set 'val'
+        val_path = os.path.join(DATASET_DIR, "val")
+        if not os.path.exists(val_path):
+            val_path = os.path.join(DATASET_DIR, "test")
+            
+        val_ds = datasets.ImageFolder(val_path, transform=val_transform)
+        
     except Exception as e:
         print(f"❌ Error loading datasets. Check DATASET_DIR: {DATASET_DIR}")
         print(f"Details: {e}")
@@ -76,23 +84,19 @@ def train_model():
     print(f"Train samples: {len(train_ds)}, Val samples: {len(val_ds)}")
     print("Train classes:", train_ds.classes)
 
-    # Analyze class distribution
-    labels = np.array(train_ds.targets)
-    unique, counts = np.unique(labels, return_counts=True)
-    print("\nClass distribution in training set:")
-    for cls_idx, count in zip(unique, counts):
-        print(f"   {train_ds.classes[cls_idx]:12s}: {count:5d} samples ({count/len(labels)*100:.1f}%)")
-
-    # SAVE CLASS NAMES (Crucial for App)
+    # Save Class Names for the App
     with open("class_names.json", "w") as f:
         json.dump(train_ds.classes, f)
     print("✓ Saved class_names.json")
 
-    # -----------------------------------
-    # WEIGHTED SAMPLING (The "Secret Sauce" for Imbalance)
-    # -----------------------------------
-    # This forces the dataloader to pick "Fear" as often as "Happy"
+    # --- 2. Weighted Sampler (Crucial for AffectNet) ---
+    labels = np.array(train_ds.targets)
     class_counts = np.bincount(labels)
+    
+    # Check for empty classes
+    if 0 in class_counts:
+        print("⚠️ Warning: Some classes have 0 samples!")
+        
     class_weights_sample = 1.0 / torch.tensor(class_counts, dtype=torch.float)
     sample_weights = class_weights_sample[labels]
     
@@ -102,11 +106,11 @@ def train_model():
         replacement=True
     )
     
-    # DATALOADERS
+    # --- 3. DataLoaders ---
     train_loader = DataLoader(
         train_ds, 
         batch_size=BATCH_SIZE, 
-        sampler=sampler,  # <--- Using Sampler (Auto-Shuffles)
+        sampler=sampler, 
         num_workers=2, 
         pin_memory=True,
         persistent_workers=True
@@ -121,9 +125,7 @@ def train_model():
         persistent_workers=True
     )
 
-    # -----------------------------------
-    # CLASS WEIGHTS FOR LOSS (Double Safety)
-    # -----------------------------------
+    # --- 4. Class Weights for Loss ---
     weights = compute_class_weight(
         class_weight='balanced',
         classes=np.unique(labels),
@@ -132,24 +134,20 @@ def train_model():
     class_weights = torch.tensor(weights, dtype=torch.float).to(DEVICE)
     print("Class weights for Loss:", class_weights.cpu().numpy().round(2))
 
-    # -----------------------------------
-    # MODEL: MobileNetV3 Small
-    # -----------------------------------
+    # --- 5. Model Architecture ---
     model = models.mobilenet_v3_small(weights="IMAGENET1K_V1")
     
-    # Custom Classifier Head
+    # Custom Head
     model.classifier = nn.Sequential(
         nn.Linear(576, 1024),
         nn.Hardswish(),
-        nn.Dropout(p=0.3), # Helps prevent overfitting
+        nn.Dropout(p=0.3),
         nn.Linear(1024, NUM_CLASSES)
     )
     
     model = model.to(DEVICE)
 
-    # -----------------------------------
-    # LOSS, OPTIMIZER, SCHEDULER
-    # -----------------------------------
+    # --- 6. Optimization ---
     criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
     
     optimizer = optim.AdamW(
@@ -158,16 +156,13 @@ def train_model():
         weight_decay=1e-4
     )
     
-    # Cosine Annealing (Starts fast, slows down smoothly)
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer, 
         T_0=10, 
         T_mult=2
     )
 
-    # -----------------------------------
-    # TRAINING LOOP
-    # -----------------------------------
+    # --- 7. Training Loop ---
     best_acc = 0.0
     patience = 12
     patience_counter = 0
@@ -177,7 +172,7 @@ def train_model():
         print(f"EPOCH {epoch+1}/{EPOCHS} | LR: {optimizer.param_groups[0]['lr']:.6f}")
         print('='*70)
         
-        # ========== TRAINING ==========
+        # Training
         model.train()
         total, correct, epoch_loss = 0, 0, 0
 
@@ -189,9 +184,7 @@ def train_model():
             loss = criterion(outputs, labels_batch)
             loss.backward()
             
-            # Gradient clipping (prevents "exploding" gradients)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
             optimizer.step()
 
             epoch_loss += loss.item()
@@ -203,7 +196,7 @@ def train_model():
         avg_train_loss = epoch_loss / len(train_loader)
         print(f"✓ Train Loss: {avg_train_loss:.4f} | Train Acc: {train_acc:.4f}")
 
-        # ========== VALIDATION ==========
+        # Validation
         model.eval()
         all_preds = []
         all_labels = []
@@ -228,7 +221,7 @@ def train_model():
         avg_val_loss = val_loss / len(val_loader)
         print(f"✓ Val Loss:   {avg_val_loss:.4f} | Val Acc:   {val_acc:.4f}")
 
-        # ========== DETAILED METRICS ==========
+        # Metrics
         if (epoch + 1) % 5 == 0:
             print("\n" + "="*70)
             print("CLASSIFICATION REPORT:")
@@ -237,19 +230,18 @@ def train_model():
 
         scheduler.step()
 
-        # ========== SAVE BEST MODEL ==========
+        # Save Best Model
         if val_acc > best_acc:
             best_acc = val_acc
-            # Updated filename for RAF-DB
-            torch.save(model.state_dict(), "mobilenet_best_RAFDB.pth")
+            # CHANGE 2: Updated filename for AffectNet
+            torch.save(model.state_dict(), "mobilenet_best_AffectNet.pth")
             print(f"\n🎉 NEW BEST MODEL SAVED! Val Acc: {val_acc:.4f}")
             patience_counter = 0
         else:
             patience_counter += 1
             
-        # Early stopping
         if patience_counter >= patience:
-            print(f"\n⚠️ Early stopping triggered (no improvement for {patience} epochs)")
+            print(f"\n⚠️ Early stopping triggered.")
             break
 
     print(f"\n{'='*70}")
@@ -259,6 +251,268 @@ def train_model():
 
 if __name__ == "__main__":
     train_model()
+# raf-db train script
+# import torch
+# import torch.nn as nn
+# import torch.optim as optim
+# from torch.utils.data import DataLoader, WeightedRandomSampler  # <--- Added Sampler
+# from torchvision import datasets, transforms, models
+# from sklearn.utils.class_weight import compute_class_weight
+# from sklearn.metrics import classification_report, confusion_matrix # <--- Added Matrix
+# import numpy as np
+# import os
+# import json
+
+# # --- Configuration for Paths ---
+# CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+# ANALYTICS_DIR = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
+# DATASET_DIR = os.path.join(ANALYTICS_DIR, "dataset", "archive_clean")
+
+# # --- CONFIG ---
+# IMG_SIZE = 224
+# BATCH_SIZE = 32   # Reduced slightly for stability
+# EPOCHS = 75       # RAF-DB converges faster than FER
+# LEARNING_RATE = 1e-3 # <--- Defined this
+# NUM_CLASSES = 7 
+
+# DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# print(f"Using device: {DEVICE}")
+# if DEVICE == "cuda":
+#     print(f"CUDA device: {torch.cuda.get_device_name(0)}")
+
+# # -----------------------------------
+# # 1. Transforms (Tailored for RAF-DB)
+# # -----------------------------------
+# # RAF-DB is high quality, so we use "Medium-High" augmentation
+# train_transform = transforms.Compose([
+#     transforms.Resize((IMG_SIZE, IMG_SIZE)),
+#     transforms.RandomRotation(15),
+#     transforms.RandomHorizontalFlip(p=0.5),
+#     transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
+#     transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
+    
+#     transforms.ToTensor(),       # 1. Convert Image to Tensor
+#     transforms.Normalize(        # 2. Normalize
+#         mean=[0.485, 0.456, 0.406],
+#         std=[0.229, 0.224, 0.225]
+#     ), 
+#     transforms.RandomErasing(p=0.1, scale=(0.02, 0.15)), # 3. Random Erasing
+# ])
+
+# val_transform = transforms.Compose([
+#     transforms.Resize((IMG_SIZE, IMG_SIZE)),
+#     transforms.ToTensor(),
+#     transforms.Normalize(
+#         mean=[0.485, 0.456, 0.406],
+#         std=[0.229, 0.224, 0.225]
+#     )
+# ])
+
+# # -----------------------------------
+# # 2. Main Logic Function
+# # -----------------------------------
+# def train_model():
+#     # --- Datasets ---
+#     try:
+#         train_ds = datasets.ImageFolder(
+#             os.path.join(DATASET_DIR, "train"),
+#             transform=train_transform
+#         )
+#         val_ds = datasets.ImageFolder(
+#             os.path.join(DATASET_DIR, "test"),
+#             transform=val_transform
+#         )
+#     except Exception as e:
+#         print(f"❌ Error loading datasets. Check DATASET_DIR: {DATASET_DIR}")
+#         print(f"Details: {e}")
+#         return
+
+#     print(f"Train samples: {len(train_ds)}, Val samples: {len(val_ds)}")
+#     print("Train classes:", train_ds.classes)
+
+#     # Analyze class distribution
+#     labels = np.array(train_ds.targets)
+#     unique, counts = np.unique(labels, return_counts=True)
+#     print("\nClass distribution in training set:")
+#     for cls_idx, count in zip(unique, counts):
+#         print(f"   {train_ds.classes[cls_idx]:12s}: {count:5d} samples ({count/len(labels)*100:.1f}%)")
+
+#     # SAVE CLASS NAMES (Crucial for App)
+#     with open("class_names.json", "w") as f:
+#         json.dump(train_ds.classes, f)
+#     print("✓ Saved class_names.json")
+
+#     # -----------------------------------
+#     # WEIGHTED SAMPLING (The "Secret Sauce" for Imbalance)
+#     # -----------------------------------
+#     # This forces the dataloader to pick "Fear" as often as "Happy"
+#     class_counts = np.bincount(labels)
+#     class_weights_sample = 1.0 / torch.tensor(class_counts, dtype=torch.float)
+#     sample_weights = class_weights_sample[labels]
+    
+#     sampler = WeightedRandomSampler(
+#         weights=sample_weights,
+#         num_samples=len(sample_weights),
+#         replacement=True
+#     )
+    
+#     # DATALOADERS
+#     train_loader = DataLoader(
+#         train_ds, 
+#         batch_size=BATCH_SIZE, 
+#         sampler=sampler,  # <--- Using Sampler (Auto-Shuffles)
+#         num_workers=2, 
+#         pin_memory=True,
+#         persistent_workers=True
+#     )
+    
+#     val_loader = DataLoader(
+#         val_ds, 
+#         batch_size=BATCH_SIZE, 
+#         shuffle=False, 
+#         num_workers=2, 
+#         pin_memory=True,
+#         persistent_workers=True
+#     )
+
+#     # -----------------------------------
+#     # CLASS WEIGHTS FOR LOSS (Double Safety)
+#     # -----------------------------------
+#     weights = compute_class_weight(
+#         class_weight='balanced',
+#         classes=np.unique(labels),
+#         y=labels
+#     )
+#     class_weights = torch.tensor(weights, dtype=torch.float).to(DEVICE)
+#     print("Class weights for Loss:", class_weights.cpu().numpy().round(2))
+
+#     # -----------------------------------
+#     # MODEL: MobileNetV3 Small
+#     # -----------------------------------
+#     model = models.mobilenet_v3_small(weights="IMAGENET1K_V1")
+    
+#     # Custom Classifier Head
+#     model.classifier = nn.Sequential(
+#         nn.Linear(576, 1024),
+#         nn.Hardswish(),
+#         nn.Dropout(p=0.3), # Helps prevent overfitting
+#         nn.Linear(1024, NUM_CLASSES)
+#     )
+    
+#     model = model.to(DEVICE)
+
+#     # -----------------------------------
+#     # LOSS, OPTIMIZER, SCHEDULER
+#     # -----------------------------------
+#     criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
+    
+#     optimizer = optim.AdamW(
+#         model.parameters(), 
+#         lr=LEARNING_RATE, 
+#         weight_decay=1e-4
+#     )
+    
+#     # Cosine Annealing (Starts fast, slows down smoothly)
+#     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+#         optimizer, 
+#         T_0=10, 
+#         T_mult=2
+#     )
+
+#     # -----------------------------------
+#     # TRAINING LOOP
+#     # -----------------------------------
+#     best_acc = 0.0
+#     patience = 12
+#     patience_counter = 0
+
+#     for epoch in range(EPOCHS):
+#         print(f"\n{'='*70}")
+#         print(f"EPOCH {epoch+1}/{EPOCHS} | LR: {optimizer.param_groups[0]['lr']:.6f}")
+#         print('='*70)
+        
+#         # ========== TRAINING ==========
+#         model.train()
+#         total, correct, epoch_loss = 0, 0, 0
+
+#         for batch_idx, (images, labels_batch) in enumerate(train_loader):
+#             images, labels_batch = images.to(DEVICE), labels_batch.to(DEVICE)
+            
+#             optimizer.zero_grad()
+#             outputs = model(images)
+#             loss = criterion(outputs, labels_batch)
+#             loss.backward()
+            
+#             # Gradient clipping (prevents "exploding" gradients)
+#             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
+#             optimizer.step()
+
+#             epoch_loss += loss.item()
+#             _, preds = torch.max(outputs, 1)
+#             correct += (preds == labels_batch).sum().item()
+#             total += labels_batch.size(0)
+
+#         train_acc = correct / total
+#         avg_train_loss = epoch_loss / len(train_loader)
+#         print(f"✓ Train Loss: {avg_train_loss:.4f} | Train Acc: {train_acc:.4f}")
+
+#         # ========== VALIDATION ==========
+#         model.eval()
+#         all_preds = []
+#         all_labels = []
+#         val_correct, val_total = 0, 0
+#         val_loss = 0.0
+
+#         with torch.no_grad():
+#             for images, labels_batch in val_loader:
+#                 images, labels_batch = images.to(DEVICE), labels_batch.to(DEVICE)
+#                 outputs = model(images)
+#                 loss = criterion(outputs, labels_batch)
+#                 val_loss += loss.item()
+
+#                 _, preds = torch.max(outputs, 1)
+#                 val_correct += (preds == labels_batch).sum().item()
+#                 val_total += labels_batch.size(0)
+
+#                 all_preds.extend(preds.cpu().numpy())
+#                 all_labels.extend(labels_batch.cpu().numpy())
+                
+#         val_acc = val_correct / val_total
+#         avg_val_loss = val_loss / len(val_loader)
+#         print(f"✓ Val Loss:   {avg_val_loss:.4f} | Val Acc:   {val_acc:.4f}")
+
+#         # ========== DETAILED METRICS ==========
+#         if (epoch + 1) % 5 == 0:
+#             print("\n" + "="*70)
+#             print("CLASSIFICATION REPORT:")
+#             print(classification_report(all_labels, all_preds, target_names=train_ds.classes, zero_division=0))
+#             print("="*70)
+
+#         scheduler.step()
+
+#         # ========== SAVE BEST MODEL ==========
+#         if val_acc > best_acc:
+#             best_acc = val_acc
+#             # Updated filename for RAF-DB
+#             torch.save(model.state_dict(), "mobilenet_best_RAFDB.pth")
+#             print(f"\n🎉 NEW BEST MODEL SAVED! Val Acc: {val_acc:.4f}")
+#             patience_counter = 0
+#         else:
+#             patience_counter += 1
+            
+#         # Early stopping
+#         if patience_counter >= patience:
+#             print(f"\n⚠️ Early stopping triggered (no improvement for {patience} epochs)")
+#             break
+
+#     print(f"\n{'='*70}")
+#     print(f"🏁 TRAINING COMPLETE!")
+#     print(f"🏆 Best Validation Accuracy: {best_acc:.4f}")
+#     print('='*70)
+
+# if __name__ == "__main__":
+#     train_model()
 # import torch
 # import torch.nn as nn
 # import torch.optim as optim
