@@ -19,10 +19,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent # Points to 'analytics' folder
 DATASET_DIR = BASE_DIR / "dataset" / "archive_clean"
 
 # CONFIGURATION
-BATCH_SIZE = 32 
-EPOCHS = 60 
-LEARNING_RATE = 0.0004 
-NUM_CLASSES = 8 
+BATCH_SIZE = 64          # If GPU allows
+EPOCHS = 50              # 60 is OK but diminishing returns
+LEARNING_RATE = 3e-4     # Slightly safer
+NUM_CLASSES = 8         # AffectNet has 8 classes
+label_smoothing = 0.05   # 0.1 is a bit high for emotion
+
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ==========================================
@@ -71,7 +73,10 @@ def train_model():
 
     # Balanced Sampling (Crucial for AffectNet imbalance)
     labels = np.array(train_ds.targets)
-    class_weights_sample = 1.0 / torch.tensor(np.bincount(labels), dtype=torch.float)
+    class_count = np.bincount(labels)
+    class_count[class_count == 0] = 1  # avoid division by zero
+    class_weights_sample = 1.0 / torch.tensor(class_count, dtype=torch.float)
+
     sampler = WeightedRandomSampler(weights=class_weights_sample[labels], num_samples=len(labels), replacement=True)
     
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler, num_workers=4, pin_memory=True)
@@ -92,6 +97,7 @@ def train_model():
     # --- 6. Optimization ---
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-2) # Stronger weight decay
+    scaler = torch.cuda.amp.GradScaler()
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
     # --- 7. Training Loop ---
@@ -105,15 +111,34 @@ def train_model():
             images, labels_batch = images.to(DEVICE), labels_batch.to(DEVICE)
             
             optimizer.zero_grad()
-            outputs = model(images)
-            loss = criterion(outputs, labels_batch)
-            loss.backward()
-            optimizer.step()
-
+            
+            with torch.cuda.amp.autocast():  # <-- automatic mixed precision
+                outputs = model(images)
+                loss = criterion(outputs, labels_batch)
+            
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            
             _, preds = torch.max(outputs, 1)
             train_correct += (preds == labels_batch).sum().item()
             train_total += labels_batch.size(0)
             loop.set_postfix(acc=f"{100*train_correct/train_total:.2f}%")
+
+
+        # for images, labels_batch in loop:
+        #     images, labels_batch = images.to(DEVICE), labels_batch.to(DEVICE)
+            
+        #     optimizer.zero_grad()
+        #     outputs = model(images)
+        #     loss = criterion(outputs, labels_batch)
+        #     loss.backward()
+        #     optimizer.step()
+
+        #     _, preds = torch.max(outputs, 1)
+        #     train_correct += (preds == labels_batch).sum().item()
+        #     train_total += labels_batch.size(0)
+        #     loop.set_postfix(acc=f"{100*train_correct/train_total:.2f}%")
 
         # Validation
         model.eval()

@@ -1,66 +1,177 @@
+import cv2
+import mediapipe as mp
 import torch
 import torch.nn as nn
 from torchvision import models, transforms
 from PIL import Image
-import os
+from collections import deque
 
+# ================================
+# CONFIG
+# ================================
+CONF_THRESHOLD = 0.65
+SMOOTHING_WINDOW = 9
+FRAME_SKIP = 2
+USE_FP16 = torch.cuda.is_available()
+
+# ================================
+# EMOTION DETECTOR
+# ================================
 class EmotionDetector:
-    def __init__(self, model_path="mobilenet_v3_large_best.pth"):
+    def __init__(self, model_path):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
-        # 1. Define the exact same architecture as train.py
-        self.model = models.mobilenet_v3_large()
-        num_ftrs = self.model.classifier[3].in_features
-        self.model.classifier[3] = nn.Sequential(
-            nn.Linear(num_ftrs, 512),
-            nn.Hardswish(),
-            nn.Dropout(p=0.5),
-            nn.Linear(512, 8)
-        )
-        
-        # 2. Load the trained weights
-        if os.path.exists(model_path):
-            self.model.load_state_dict(torch.load(model_path, map_location=self.device))
-            print(f"✅ Loaded weights from {model_path}")
-        else:
-            print(f"⚠️ Warning: {model_path} not found. Using random weights.")
-            
-        self.model.to(self.device)
-        self.model.eval()
 
-        # 3. Image Preprocessing
+        self.labels = [
+            'Anger', 'Contempt', 'Disgust', 'Fear',
+            'Happy', 'Neutral', 'Sad', 'Surprise'
+        ]
+
+        self.model = models.mobilenet_v3_large(weights=None)
+        num_ftrs = self.model.classifier[0].in_features
+
+        self.model.classifier = nn.Sequential(
+            nn.Linear(num_ftrs, 1024),
+            nn.Hardswish(),
+            nn.Dropout(0.5),
+            nn.Linear(1024, len(self.labels))
+        )
+
+        state = torch.load(
+            model_path,
+            map_location=self.device,
+            weights_only=True
+        )
+        self.model.load_state_dict(state)
+        self.model.to(self.device).eval()
+
+        if USE_FP16:
+            self.model = self.model.half()
+
         self.transform = transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225]
+            )
         ])
 
-        # 4. Label Mapping (Match your folder order)
-        self.labels = ['Anger', 'Contempt', 'Disgust', 'Fear', 'Happy', 'Neutral', 'Sad', 'Surprise']
+        self.face_detector = mp.solutions.face_detection.FaceDetection(
+            model_selection=0,
+            min_detection_confidence=0.6
+        )
 
-    def predict(self, image_path):
-        try:
-            img = Image.open(image_path).convert('RGB')
-            img_t = self.transform(img).unsqueeze(0).to(self.device)
+        self.history = deque(maxlen=SMOOTHING_WINDOW)
+        self.conf_history = deque(maxlen=SMOOTHING_WINDOW)
 
-            with torch.no_grad():
-                outputs = self.model(img_t)
-                probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
-                confidence, index = torch.max(probabilities, 0)
+    def predict(self, frame):
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = self.face_detector.process(rgb)
 
-            return {
-                "emotion": self.labels[index.item()],
-                "confidence": confidence.item()
-            }
-        except Exception as e:
-            return {"error": str(e)}
+        if not results.detections:
+            self.history.clear()
+            self.conf_history.clear()
+            return None, None, None
 
-# --- Quick Test ---
-if __name__ == "__main__":
-    detector = EmotionDetector()
-    # Replace with a path to a real image to test
-    result = detector.predict("test_image.jpg")
-    print(f"Result: {result}")
+        h, w, _ = frame.shape
+        det = results.detections[0]
+        box = det.location_data.relative_bounding_box
+
+        x1 = int(box.xmin * w)
+        y1 = int(box.ymin * h)
+        x2 = int((box.xmin + box.width) * w)
+        y2 = int((box.ymin + box.height) * h)
+
+        face = frame[y1:y2, x1:x2]
+        if face.size == 0:
+            return None, None, None
+
+        img = Image.fromarray(cv2.cvtColor(face, cv2.COLOR_BGR2RGB))
+        img = self.transform(img).unsqueeze(0)
+
+        if USE_FP16:
+            img = img.half()
+
+        img = img.to(self.device)
+
+        with torch.no_grad():
+            probs = torch.softmax(self.model(img), dim=1)[0]
+            conf, idx = torch.max(probs, dim=0)
+
+        conf = conf.item()
+        idx = idx.item()
+
+        if conf < CONF_THRESHOLD:
+            return "Uncertain", conf, (x1, y1, x2, y2)
+
+        self.history.append(idx)
+        self.conf_history.append(conf)
+
+        stable_idx = max(set(self.history), key=self.history.count)
+        stable_conf = sum(self.conf_history) / len(self.conf_history)
+
+        return self.labels[stable_idx], stable_conf, (x1, y1, x2, y2)
+
+
+# ================================
+# CAMERA LOOP
+# ================================
+cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+detector = EmotionDetector("mobilenet_v3_large_best.pth")
+
+frame_count = 0
+last_result = (None, None, None)
+
+print("🎥 Emotion Detection Running — Press Q to quit")
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    frame_count += 1
+
+    if frame_count % FRAME_SKIP == 0:
+        last_result = detector.predict(frame)
+
+    emotion, conf, box = last_result
+
+    if emotion is None:
+        cv2.putText(frame, "No Face", (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+    else:
+        x1, y1, x2, y2 = box
+        color = (0, 255, 0) if emotion != "Uncertain" else (0, 255, 255)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(
+            frame,
+            f"{emotion} ({conf*100:.1f}%)",
+            (x1, y1 - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.9,
+            color,
+            2
+        )
+
+    cv2.imshow("Emotion Detection", frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
+
+
+
+
+
+
+
+
+
+
+
+
+
 # import time
 # import collections
 # import cv2
