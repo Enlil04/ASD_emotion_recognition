@@ -12,7 +12,8 @@ import numpy as np
 # ==============================
 FRAME_SKIP = 2
 SMOOTHING_WINDOW = 9
-USE_FP16 = torch.cuda.is_available()
+# Use FP16 only if your GPU supports it well; otherwise, stay with Float32 for stability
+USE_FP16 = torch.cuda.is_available() 
 
 LABELS = [
     'Anger',
@@ -24,14 +25,14 @@ LABELS = [
     'Surprise'
 ]
 
-# Emotion-specific confidence thresholds
+# Adjusted thresholds based on the weighted training
 EMOTION_THRESHOLDS = {
-    "Anger": 0.45,
-    "Disgust": 0.38,
-    "Fear": 0.38,
+    "Anger": 0.40,
+    "Disgust": 0.35,
+    "Fear": 0.35,
     "Happy": 0.50,
-    "Neutral": 0.55,
-    "Sad": 0.42,
+    "Neutral": 0.50,
+    "Sad": 0.40,
     "Surprise": 0.40
 }
 
@@ -42,24 +43,34 @@ class EmotionDetector:
     def __init__(self, model_path):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # ---- Model ----
+        # ---- 1. Match Architecture Exactly ----
         self.model = models.mobilenet_v3_large(weights=None)
         num_ftrs = self.model.classifier[0].in_features
+        
+        # This MUST match the Sequential block in your train.py
         self.model.classifier = nn.Sequential(
             nn.Linear(num_ftrs, 1024),
             nn.Hardswish(),
             nn.Dropout(0.5),
-            nn.Linear(1024, len(LABELS))
+            nn.Linear(1024, len(LABELS)) 
         )
 
-        state = torch.load(model_path, map_location=self.device, weights_only=True)
-        self.model.load_state_dict(state)
+        # ---- 2. Load State with Error Handling ----
+        try:
+            state = torch.load(model_path, map_location=self.device, weights_only=True)
+            self.model.load_state_dict(state)
+            print(f"✅ Successfully loaded model: {model_path}")
+        except RuntimeError as e:
+            print(f"❌ Load Error: {e}")
+            print("💡 TIP: Ensure you are loading the 7-class model, not an old 8-class one.")
+            exit()
+
         self.model.to(self.device).eval()
 
         if USE_FP16:
             self.model.half()
 
-        # ---- Image preprocessing ----
+        # ---- Preprocessing (Matches Val Transform) ----
         self.transform = transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.ToTensor(),
@@ -69,17 +80,14 @@ class EmotionDetector:
             )
         ])
 
-        # ---- Face detector ----
         self.face_detector = mp.solutions.face_detection.FaceDetection(
             model_selection=0,
             min_detection_confidence=0.6
         )
 
-        # ---- Temporal smoothing ----
         self.idx_history = deque(maxlen=SMOOTHING_WINDOW)
         self.conf_history = deque(maxlen=SMOOTHING_WINDOW)
 
-    # ==============================
     def predict(self, frame):
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         result = self.face_detector.process(rgb)
@@ -102,26 +110,19 @@ class EmotionDetector:
         if face.size == 0:
             return None, None, None
 
-        # ==============================
-        # Fear vs Disgust heuristic
-        # ==============================
+        # Heuristics for difficult classes
         fh, fw, _ = face.shape
         upper_face = face[: int(0.45 * fh), :]
         lower_face = face[int(0.55 * fh):, :]
-
         upper_energy = upper_face.std()
         lower_energy = lower_face.std()
 
-        # ==============================
         # Model inference
-        # ==============================
         img = Image.fromarray(cv2.cvtColor(face, cv2.COLOR_BGR2RGB))
-        img = self.transform(img).unsqueeze(0)
+        img = self.transform(img).unsqueeze(0).to(self.device)
 
         if USE_FP16:
             img = img.half()
-
-        img = img.to(self.device)
 
         with torch.no_grad():
             logits = self.model(img)
@@ -132,36 +133,25 @@ class EmotionDetector:
         idx = idx.item()
         emotion = LABELS[idx]
 
-        # ==============================
-        # Fear / Disgust correction
-        # ==============================
+        # Apply Correction Heuristics
         if emotion in ("Fear", "Disgust"):
             if upper_energy > lower_energy * 1.15:
                 emotion = "Fear"
             elif lower_energy > upper_energy * 1.15:
                 emotion = "Disgust"
 
-        # ==============================
-        # Neutral dominance suppression
-        # ==============================
+        # Neutral Suppression (Helps catch subtle emotions)
         neutral_idx = LABELS.index("Neutral")
         neutral_conf = probs[neutral_idx].item()
-
-        if emotion != "Neutral" and conf + 0.08 > neutral_conf:
-            pass
-        elif emotion == "Neutral" and conf < 0.6:
+        if emotion == "Neutral" and conf < 0.55: # Slightly lower threshold
             return "Uncertain", conf, (x1, y1, x2, y2)
 
-        # ==============================
-        # Confidence threshold
-        # ==============================
-        threshold = EMOTION_THRESHOLDS.get(emotion, 0.45)
+        # Check Threshold
+        threshold = EMOTION_THRESHOLDS.get(emotion, 0.40)
         if conf < threshold:
             return "Uncertain", conf, (x1, y1, x2, y2)
 
-        # ==============================
-        # EMA temporal smoothing
-        # ==============================
+        # EMA Smoothing
         self.idx_history.append(LABELS.index(emotion))
         self.conf_history.append(conf)
 
@@ -175,50 +165,36 @@ class EmotionDetector:
         return LABELS[stable_idx], stable_conf, (x1, y1, x2, y2)
 
 # ==============================
-# CAMERA LOOP
+# MAIN LOOP
 # ==============================
-cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-detector = EmotionDetector("mobilenet_v3_large_best.pth")
+if __name__ == "__main__":
+    # Ensure this matches the MODEL_SAVE_PATH in your train.py
+    MODEL_FILE = "mobilenet_v3_large_affectnet7.pth" 
+    
+    cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+    detector = EmotionDetector(MODEL_FILE)
 
-frame_count = 0
-last_result = (None, None, None)
+    print(f"🎥 Detection Started using {MODEL_FILE}")
 
-print("🎥 Emotion Detection (AffectNet-7) — Press Q to quit")
+    while True:
+        ret, frame = cap.read()
+        if not ret: break
 
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
+        # Prediction logic
+        emotion, conf, box = detector.predict(frame)
 
-    frame_count += 1
-    if frame_count % FRAME_SKIP == 0:
-        last_result = detector.predict(frame)
+        if emotion:
+            x1, y1, x2, y2 = box
+            color = (0, 255, 0) if emotion != "Uncertain" else (0, 255, 255)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(frame, f"{emotion} ({conf*100:.1f}%)", (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
-    emotion, conf, box = last_result
+        cv2.imshow("Emotion AI", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'): break
 
-    if emotion is None:
-        cv2.putText(frame, "No Face", (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-    else:
-        x1, y1, x2, y2 = box
-        color = (0, 255, 0) if emotion != "Uncertain" else (0, 255, 255)
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(
-            frame,
-            f"{emotion} ({conf*100:.1f}%)",
-            (x1, y1 - 10),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.9,
-            color,
-            2
-        )
-
-    cv2.imshow("Emotion Detection", frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-cap.release()
-cv2.destroyAllWindows()
+    cap.release()
+    cv2.destroyAllWindows()
 
 
 
