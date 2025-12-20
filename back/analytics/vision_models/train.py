@@ -3,54 +3,49 @@ import torch.nn as nn
 import torch.optim as optim
 from torchvision import datasets, transforms, models
 from torch.utils.data import DataLoader, WeightedRandomSampler
-from sklearn.utils.class_weight import compute_class_weight
-from tqdm import tqdm
 from pathlib import Path
 from PIL import Image
 import numpy as np
-import json
+import pandas as pd
+from tqdm import tqdm
 import os
 
-# ==========================================
-# 1. ROBUST PATHING (Fixes FileNotFoundError)
-# ==========================================
-# This finds the absolute path regardless of where you run the script from
-BASE_DIR = Path(__file__).resolve().parent.parent # Points to 'analytics' folder
+# =========================================================
+# 1. PATHS & CONFIG
+# =========================================================
+BASE_DIR = Path(__file__).resolve().parent.parent
 DATASET_DIR = BASE_DIR / "dataset" / "archive_clean"
+MODEL_SAVE_PATH = "mobilenet_v3_large_affectnet7.pth"
 
-# CONFIGURATION
-BATCH_SIZE = 64          # If GPU allows
-EPOCHS = 50              # 60 is OK but diminishing returns
-LEARNING_RATE = 3e-4     # Slightly safer
-NUM_CLASSES = 8         # AffectNet has 8 classes
-label_smoothing = 0.05   # 0.1 is a bit high for emotion
+BATCH_SIZE = 64
+EPOCHS = 50
+LEARNING_RATE = 3e-4
+NUM_CLASSES = 7  # (Anger, Disgust, Fear, Happy, Neutral, Sad, Surprise)
+LABEL_SMOOTHING = 0.05
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+USE_AMP = torch.cuda.is_available()
 
-# ==========================================
-# 2. SAFE LOADER (Fixes UnidentifiedImageError)
-# ==========================================
+# =========================================================
+# 2. DATA UTILITIES
+# =========================================================
 def safe_loader(path):
     try:
-        with open(path, 'rb') as f:
+        with open(path, "rb") as f:
             img = Image.open(f)
-            return img.convert('RGB')
-    except Exception as e:
-        print(f"\n⚠️ Skipping corrupt image: {path}")
-        return Image.new('RGB', (224, 224), (0, 0, 0)) # Return black image as fallback
+            return img.convert("RGB")
+    except Exception:
+        return Image.new("RGB", (224, 224), (0, 0, 0))
 
-# ==========================================
-# 3. AUGMENTATION (Fixes 30% Overfitting Gap)
-# ==========================================
 train_transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.RandomHorizontalFlip(),
     transforms.RandomRotation(20),
-    transforms.ColorJitter(brightness=0.3, contrast=0.3),
-    transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
+    transforms.ColorJitter(0.3, 0.3),
+    transforms.RandomAffine(0, translate=(0.1, 0.1)),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    transforms.RandomErasing(p=0.2, scale=(0.02, 0.1)) # Forces model to look at features, not noise
+    transforms.RandomErasing(p=0.2, scale=(0.02, 0.1))
 ])
 
 val_transform = transforms.Compose([
@@ -59,110 +54,284 @@ val_transform = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
-def train_model():
-    print(f"🚀 Training on: {DEVICE}")
-    print(f"📂 Dataset Path: {DATASET_DIR}")
-
-    if not DATASET_DIR.exists():
-        print(f"❌ Error: Cannot find dataset at {DATASET_DIR}")
-        return
-
-    # --- 4. Load Datasets ---
-    train_ds = datasets.ImageFolder(root=str(DATASET_DIR / "train"), transform=train_transform, loader=safe_loader)
-    val_ds = datasets.ImageFolder(root=str(DATASET_DIR / "test"), transform=val_transform, loader=safe_loader)
-
-    # Balanced Sampling (Crucial for AffectNet imbalance)
-    labels = np.array(train_ds.targets)
-    class_count = np.bincount(labels)
-    class_count[class_count == 0] = 1  # avoid division by zero
-    class_weights_sample = 1.0 / torch.tensor(class_count, dtype=torch.float)
-
-    sampler = WeightedRandomSampler(weights=class_weights_sample[labels], num_samples=len(labels), replacement=True)
+# =========================================================
+# 3. TRAINING FUNCTION
+# =========================================================
+def train():
+    print(f"\n🚀 Training Started on: {DEVICE}")
     
+    # --- Load Data ---
+    train_ds = datasets.ImageFolder(DATASET_DIR / "train", transform=train_transform, loader=safe_loader)
+    val_ds = datasets.ImageFolder(DATASET_DIR / "test", transform=val_transform, loader=safe_loader)
+
+    # --- Handle Class Imbalance using labels.csv ---
+    csv_path = DATASET_DIR / "labels.csv"
+    if csv_path.exists():
+        print("📊 Calculating weights from labels.csv...")
+        df = pd.read_csv(csv_path)
+        # Ensure we only count classes that exist in our 7-class setup
+        counts = df['label'].value_counts().sort_index().values
+    else:
+        print("⚠️ labels.csv not found, using folder counts.")
+        counts = np.bincount(train_ds.targets)
+
+    # Calculate Weights for Loss Function (Penalizes missing rare emotions)
+    total_samples = sum(counts)
+    weights = total_samples / (len(counts) * counts)
+    loss_weights = torch.tensor(weights, dtype=torch.float).to(DEVICE)
+
+    # Calculate Weights for Sampler (Shows model more rare images)
+    sample_weights = (1.0 / counts)[train_ds.targets]
+    sampler = WeightedRandomSampler(
+        weights=torch.from_numpy(sample_weights).float(),
+        num_samples=len(sample_weights),
+        replacement=True
+    )
+
+    # --- Data Loaders ---
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
 
-    # --- 5. Model (MobileNetV3-Large for higher accuracy) ---
+    # --- Build Model ---
     model = models.mobilenet_v3_large(weights="IMAGENET1K_V2")
-    num_ftrs = model.classifier[0].in_features
+    in_features = model.classifier[0].in_features
     
+    # Custom head to match your EmotionDetector script
     model.classifier = nn.Sequential(
-        nn.Linear(num_ftrs, 1024),
+        nn.Linear(in_features, 1024),
         nn.Hardswish(),
-        nn.Dropout(p=0.5), # High dropout to stop the 86% vs 55% gap
+        nn.Dropout(0.5),
         nn.Linear(1024, NUM_CLASSES)
     )
-    model = model.to(DEVICE)
+    model.to(DEVICE)
 
-    # --- 6. Optimization ---
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
-    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-2) # Stronger weight decay
-    scaler = torch.cuda.amp.GradScaler()
+    # --- Optimization ---
+    criterion = nn.CrossEntropyLoss(weight=loss_weights, label_smoothing=LABEL_SMOOTHING)
+    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-2)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+    scaler = torch.cuda.amp.GradScaler(enabled=USE_AMP)
 
-    # --- 7. Training Loop ---
+    # --- Loop ---
     best_acc = 0.0
     for epoch in range(EPOCHS):
         model.train()
-        train_correct, train_total = 0, 0
+        train_loss, correct, total = 0, 0, 0
         
         loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}")
-        for images, labels_batch in loop:
-            images, labels_batch = images.to(DEVICE), labels_batch.to(DEVICE)
+        for images, targets in loop:
+            images, targets = images.to(DEVICE), targets.to(DEVICE)
             
-            optimizer.zero_grad()
-            
-            with torch.cuda.amp.autocast():  # <-- automatic mixed precision
+            optimizer.zero_grad(set_to_none=True)
+
+            with torch.cuda.amp.autocast(enabled=USE_AMP):
                 outputs = model(images)
-                loss = criterion(outputs, labels_batch)
-            
+                loss = criterion(outputs, targets)
+
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
-            
-            _, preds = torch.max(outputs, 1)
-            train_correct += (preds == labels_batch).sum().item()
-            train_total += labels_batch.size(0)
-            loop.set_postfix(acc=f"{100*train_correct/train_total:.2f}%")
 
+            _, preds = outputs.max(1)
+            correct += (preds == targets).sum().item()
+            total += targets.size(0)
+            train_loss += loss.item()
 
-        # for images, labels_batch in loop:
-        #     images, labels_batch = images.to(DEVICE), labels_batch.to(DEVICE)
-            
-        #     optimizer.zero_grad()
-        #     outputs = model(images)
-        #     loss = criterion(outputs, labels_batch)
-        #     loss.backward()
-        #     optimizer.step()
+            loop.set_postfix(acc=f"{100*correct/total:.2f}%", loss=f"{loss.item():.4f}")
 
-        #     _, preds = torch.max(outputs, 1)
-        #     train_correct += (preds == labels_batch).sum().item()
-        #     train_total += labels_batch.size(0)
-        #     loop.set_postfix(acc=f"{100*train_correct/train_total:.2f}%")
-
-        # Validation
+        # --- Validation ---
         model.eval()
         val_correct, val_total = 0, 0
         with torch.no_grad():
-            for images, labels_batch in val_loader:
-                images, labels_batch = images.to(DEVICE), labels_batch.to(DEVICE)
+            for images, targets in val_loader:
+                images, targets = images.to(DEVICE), targets.to(DEVICE)
                 outputs = model(images)
-                _, preds = torch.max(outputs, 1)
-                val_correct += (preds == labels_batch).sum().item()
-                val_total += labels_batch.size(0)
+                _, preds = outputs.max(1)
+                val_correct += (preds == targets).sum().item()
+                val_total += targets.size(0)
 
         val_acc = val_correct / val_total
-        print(f"📊 Epoch {epoch+1} Summary: Train Acc: {100*train_correct/train_total:.2f}% | Val Acc: {100*val_acc:.2f}%")
-
+        print(f"📈 Summary | Train Acc: {100*correct/total:.2f}% | Val Acc: {100*val_acc:.2f}%")
+        
         scheduler.step()
 
         if val_acc > best_acc:
             best_acc = val_acc
-            torch.save(model.state_dict(), "mobilenet_v3_large_best.pth")
-            print(f"⭐ Saved New Best: {100*val_acc:.2f}%")
+            torch.save(model.state_dict(), MODEL_SAVE_PATH)
+            print(f"⭐ Saved Best Model: {100*best_acc:.2f}%")
+
+    print(f"\n✅ Training Complete. Best Val Accuracy: {100*best_acc:.2f}%")
 
 if __name__ == "__main__":
-    train_model()
+    train()
+
+
+
+
+# import torch
+# import torch.nn as nn
+# import torch.optim as optim
+# from torchvision import datasets, transforms, models
+# from torch.utils.data import DataLoader, WeightedRandomSampler
+# from sklearn.utils.class_weight import compute_class_weight
+# from tqdm import tqdm
+# from pathlib import Path
+# from PIL import Image
+# import numpy as np
+# import json
+# import os
+
+# # ==========================================
+# # 1. ROBUST PATHING (Fixes FileNotFoundError)
+# # ==========================================
+# # This finds the absolute path regardless of where you run the script from
+# BASE_DIR = Path(__file__).resolve().parent.parent # Points to 'analytics' folder
+# DATASET_DIR = BASE_DIR / "dataset" / "archive_clean"
+
+# # CONFIGURATION
+# BATCH_SIZE = 64          # If GPU allows
+# EPOCHS = 50              # 60 is OK but diminishing returns
+# LEARNING_RATE = 3e-4     # Slightly safer
+# NUM_CLASSES = 8         # AffectNet has 8 classes
+# label_smoothing = 0.05   # 0.1 is a bit high for emotion
+
+# DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+# # ==========================================
+# # 2. SAFE LOADER (Fixes UnidentifiedImageError)
+# # ==========================================
+# def safe_loader(path):
+#     try:
+#         with open(path, 'rb') as f:
+#             img = Image.open(f)
+#             return img.convert('RGB')
+#     except Exception as e:
+#         print(f"\n⚠️ Skipping corrupt image: {path}")
+#         return Image.new('RGB', (224, 224), (0, 0, 0)) # Return black image as fallback
+
+# # ==========================================
+# # 3. AUGMENTATION (Fixes 30% Overfitting Gap)
+# # ==========================================
+# train_transform = transforms.Compose([
+#     transforms.Resize((224, 224)),
+#     transforms.RandomHorizontalFlip(),
+#     transforms.RandomRotation(20),
+#     transforms.ColorJitter(brightness=0.3, contrast=0.3),
+#     transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
+#     transforms.ToTensor(),
+#     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+#     transforms.RandomErasing(p=0.2, scale=(0.02, 0.1)) # Forces model to look at features, not noise
+# ])
+
+# val_transform = transforms.Compose([
+#     transforms.Resize((224, 224)),
+#     transforms.ToTensor(),
+#     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+# ])
+
+# def train_model():
+#     print(f"🚀 Training on: {DEVICE}")
+#     print(f"📂 Dataset Path: {DATASET_DIR}")
+
+#     if not DATASET_DIR.exists():
+#         print(f"❌ Error: Cannot find dataset at {DATASET_DIR}")
+#         return
+
+#     # --- 4. Load Datasets ---
+#     train_ds = datasets.ImageFolder(root=str(DATASET_DIR / "train"), transform=train_transform, loader=safe_loader)
+#     val_ds = datasets.ImageFolder(root=str(DATASET_DIR / "test"), transform=val_transform, loader=safe_loader)
+
+#     # Balanced Sampling (Crucial for AffectNet imbalance)
+#     labels = np.array(train_ds.targets)
+#     class_count = np.bincount(labels)
+#     class_count[class_count == 0] = 1  # avoid division by zero
+#     class_weights_sample = 1.0 / torch.tensor(class_count, dtype=torch.float)
+
+#     sampler = WeightedRandomSampler(weights=class_weights_sample[labels], num_samples=len(labels), replacement=True)
+    
+#     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler, num_workers=4, pin_memory=True)
+#     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
+
+#     # --- 5. Model (MobileNetV3-Large for higher accuracy) ---
+#     model = models.mobilenet_v3_large(weights="IMAGENET1K_V2")
+#     num_ftrs = model.classifier[0].in_features
+    
+#     model.classifier = nn.Sequential(
+#         nn.Linear(num_ftrs, 1024),
+#         nn.Hardswish(),
+#         nn.Dropout(p=0.5), # High dropout to stop the 86% vs 55% gap
+#         nn.Linear(1024, NUM_CLASSES)
+#     )
+#     model = model.to(DEVICE)
+
+#     # --- 6. Optimization ---
+#     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+#     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-2) # Stronger weight decay
+#     scaler = torch.cuda.amp.GradScaler()
+#     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+
+#     # --- 7. Training Loop ---
+#     best_acc = 0.0
+#     for epoch in range(EPOCHS):
+#         model.train()
+#         train_correct, train_total = 0, 0
+        
+#         loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}")
+#         for images, labels_batch in loop:
+#             images, labels_batch = images.to(DEVICE), labels_batch.to(DEVICE)
+            
+#             optimizer.zero_grad()
+            
+#             with torch.cuda.amp.autocast():  # <-- automatic mixed precision
+#                 outputs = model(images)
+#                 loss = criterion(outputs, labels_batch)
+            
+#             scaler.scale(loss).backward()
+#             scaler.step(optimizer)
+#             scaler.update()
+            
+#             _, preds = torch.max(outputs, 1)
+#             train_correct += (preds == labels_batch).sum().item()
+#             train_total += labels_batch.size(0)
+#             loop.set_postfix(acc=f"{100*train_correct/train_total:.2f}%")
+
+
+#         # for images, labels_batch in loop:
+#         #     images, labels_batch = images.to(DEVICE), labels_batch.to(DEVICE)
+            
+#         #     optimizer.zero_grad()
+#         #     outputs = model(images)
+#         #     loss = criterion(outputs, labels_batch)
+#         #     loss.backward()
+#         #     optimizer.step()
+
+#         #     _, preds = torch.max(outputs, 1)
+#         #     train_correct += (preds == labels_batch).sum().item()
+#         #     train_total += labels_batch.size(0)
+#         #     loop.set_postfix(acc=f"{100*train_correct/train_total:.2f}%")
+
+#         # Validation
+#         model.eval()
+#         val_correct, val_total = 0, 0
+#         with torch.no_grad():
+#             for images, labels_batch in val_loader:
+#                 images, labels_batch = images.to(DEVICE), labels_batch.to(DEVICE)
+#                 outputs = model(images)
+#                 _, preds = torch.max(outputs, 1)
+#                 val_correct += (preds == labels_batch).sum().item()
+#                 val_total += labels_batch.size(0)
+
+#         val_acc = val_correct / val_total
+#         print(f"📊 Epoch {epoch+1} Summary: Train Acc: {100*train_correct/train_total:.2f}% | Val Acc: {100*val_acc:.2f}%")
+
+#         scheduler.step()
+
+#         if val_acc > best_acc:
+#             best_acc = val_acc
+#             torch.save(model.state_dict(), "mobilenet_v3_large_best.pth")
+#             print(f"⭐ Saved New Best: {100*val_acc:.2f}%")
+
+# if __name__ == "__main__":
+#     train_model()
 # import torch
 # import torch.nn as nn
 # import torch.optim as optim

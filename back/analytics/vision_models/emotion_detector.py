@@ -5,48 +5,61 @@ import torch.nn as nn
 from torchvision import models, transforms
 from PIL import Image
 from collections import deque
+import numpy as np
 
-# ================================
+# ==============================
 # CONFIG
-# ================================
-CONF_THRESHOLD = 0.65
-SMOOTHING_WINDOW = 9
+# ==============================
 FRAME_SKIP = 2
+SMOOTHING_WINDOW = 9
 USE_FP16 = torch.cuda.is_available()
 
-# ================================
+LABELS = [
+    'Anger',
+    'Disgust',
+    'Fear',
+    'Happy',
+    'Neutral',
+    'Sad',
+    'Surprise'
+]
+
+# Emotion-specific confidence thresholds
+EMOTION_THRESHOLDS = {
+    "Anger": 0.45,
+    "Disgust": 0.38,
+    "Fear": 0.38,
+    "Happy": 0.50,
+    "Neutral": 0.55,
+    "Sad": 0.42,
+    "Surprise": 0.40
+}
+
+# ==============================
 # EMOTION DETECTOR
-# ================================
+# ==============================
 class EmotionDetector:
     def __init__(self, model_path):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.labels = [
-            'Anger', 'Contempt', 'Disgust', 'Fear',
-            'Happy', 'Neutral', 'Sad', 'Surprise'
-        ]
-
+        # ---- Model ----
         self.model = models.mobilenet_v3_large(weights=None)
         num_ftrs = self.model.classifier[0].in_features
-
         self.model.classifier = nn.Sequential(
             nn.Linear(num_ftrs, 1024),
             nn.Hardswish(),
             nn.Dropout(0.5),
-            nn.Linear(1024, len(self.labels))
+            nn.Linear(1024, len(LABELS))
         )
 
-        state = torch.load(
-            model_path,
-            map_location=self.device,
-            weights_only=True
-        )
+        state = torch.load(model_path, map_location=self.device, weights_only=True)
         self.model.load_state_dict(state)
         self.model.to(self.device).eval()
 
         if USE_FP16:
-            self.model = self.model.half()
+            self.model.half()
 
+        # ---- Image preprocessing ----
         self.transform = transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.ToTensor(),
@@ -56,36 +69,52 @@ class EmotionDetector:
             )
         ])
 
+        # ---- Face detector ----
         self.face_detector = mp.solutions.face_detection.FaceDetection(
             model_selection=0,
             min_detection_confidence=0.6
         )
 
-        self.history = deque(maxlen=SMOOTHING_WINDOW)
+        # ---- Temporal smoothing ----
+        self.idx_history = deque(maxlen=SMOOTHING_WINDOW)
         self.conf_history = deque(maxlen=SMOOTHING_WINDOW)
 
+    # ==============================
     def predict(self, frame):
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = self.face_detector.process(rgb)
+        result = self.face_detector.process(rgb)
 
-        if not results.detections:
-            self.history.clear()
+        if not result.detections:
+            self.idx_history.clear()
             self.conf_history.clear()
             return None, None, None
 
         h, w, _ = frame.shape
-        det = results.detections[0]
+        det = result.detections[0]
         box = det.location_data.relative_bounding_box
 
-        x1 = int(box.xmin * w)
-        y1 = int(box.ymin * h)
-        x2 = int((box.xmin + box.width) * w)
-        y2 = int((box.ymin + box.height) * h)
+        x1 = max(0, int(box.xmin * w))
+        y1 = max(0, int(box.ymin * h))
+        x2 = min(w, int((box.xmin + box.width) * w))
+        y2 = min(h, int((box.ymin + box.height) * h))
 
         face = frame[y1:y2, x1:x2]
         if face.size == 0:
             return None, None, None
 
+        # ==============================
+        # Fear vs Disgust heuristic
+        # ==============================
+        fh, fw, _ = face.shape
+        upper_face = face[: int(0.45 * fh), :]
+        lower_face = face[int(0.55 * fh):, :]
+
+        upper_energy = upper_face.std()
+        lower_energy = lower_face.std()
+
+        # ==============================
+        # Model inference
+        # ==============================
         img = Image.fromarray(cv2.cvtColor(face, cv2.COLOR_BGR2RGB))
         img = self.transform(img).unsqueeze(0)
 
@@ -95,34 +124,66 @@ class EmotionDetector:
         img = img.to(self.device)
 
         with torch.no_grad():
-            probs = torch.softmax(self.model(img), dim=1)[0]
-            conf, idx = torch.max(probs, dim=0)
+            logits = self.model(img)
+            probs = torch.softmax(logits, dim=1)[0]
 
+        conf, idx = torch.max(probs, dim=0)
         conf = conf.item()
         idx = idx.item()
+        emotion = LABELS[idx]
 
-        if conf < CONF_THRESHOLD:
+        # ==============================
+        # Fear / Disgust correction
+        # ==============================
+        if emotion in ("Fear", "Disgust"):
+            if upper_energy > lower_energy * 1.15:
+                emotion = "Fear"
+            elif lower_energy > upper_energy * 1.15:
+                emotion = "Disgust"
+
+        # ==============================
+        # Neutral dominance suppression
+        # ==============================
+        neutral_idx = LABELS.index("Neutral")
+        neutral_conf = probs[neutral_idx].item()
+
+        if emotion != "Neutral" and conf + 0.08 > neutral_conf:
+            pass
+        elif emotion == "Neutral" and conf < 0.6:
             return "Uncertain", conf, (x1, y1, x2, y2)
 
-        self.history.append(idx)
+        # ==============================
+        # Confidence threshold
+        # ==============================
+        threshold = EMOTION_THRESHOLDS.get(emotion, 0.45)
+        if conf < threshold:
+            return "Uncertain", conf, (x1, y1, x2, y2)
+
+        # ==============================
+        # EMA temporal smoothing
+        # ==============================
+        self.idx_history.append(LABELS.index(emotion))
         self.conf_history.append(conf)
 
-        stable_idx = max(set(self.history), key=self.history.count)
-        stable_conf = sum(self.conf_history) / len(self.conf_history)
+        weights = np.linspace(0.5, 1.0, len(self.idx_history))
+        weights /= weights.sum()
 
-        return self.labels[stable_idx], stable_conf, (x1, y1, x2, y2)
+        stable_idx = int(np.round(np.sum(np.array(self.idx_history) * weights)))
+        stable_idx = max(0, min(stable_idx, len(LABELS) - 1))
+        stable_conf = float(np.sum(np.array(self.conf_history) * weights))
 
+        return LABELS[stable_idx], stable_conf, (x1, y1, x2, y2)
 
-# ================================
+# ==============================
 # CAMERA LOOP
-# ================================
+# ==============================
 cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 detector = EmotionDetector("mobilenet_v3_large_best.pth")
 
 frame_count = 0
 last_result = (None, None, None)
 
-print("🎥 Emotion Detection Running — Press Q to quit")
+print("🎥 Emotion Detection (AffectNet-7) — Press Q to quit")
 
 while True:
     ret, frame = cap.read()
@@ -130,7 +191,6 @@ while True:
         break
 
     frame_count += 1
-
     if frame_count % FRAME_SKIP == 0:
         last_result = detector.predict(frame)
 
@@ -159,6 +219,173 @@ while True:
 
 cap.release()
 cv2.destroyAllWindows()
+
+
+
+
+# best one so far
+
+# import cv2
+# import mediapipe as mp
+# import torch
+# import torch.nn as nn
+# from torchvision import models, transforms
+# from PIL import Image
+# from collections import deque
+
+# # ================================
+# # CONFIG
+# # ================================
+# CONF_THRESHOLD = 0.65
+# SMOOTHING_WINDOW = 9
+# FRAME_SKIP = 2
+# USE_FP16 = torch.cuda.is_available()
+
+# # ================================
+# # EMOTION DETECTOR
+# # ================================
+# class EmotionDetector:
+#     def __init__(self, model_path):
+#         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+#         self.labels = [
+#             'Anger', 'Contempt', 'Disgust', 'Fear',
+#             'Happy', 'Neutral', 'Sad', 'Surprise'
+#         ]
+
+#         self.model = models.mobilenet_v3_large(weights=None)
+#         num_ftrs = self.model.classifier[0].in_features
+
+#         self.model.classifier = nn.Sequential(
+#             nn.Linear(num_ftrs, 1024),
+#             nn.Hardswish(),
+#             nn.Dropout(0.5),
+#             nn.Linear(1024, len(self.labels))
+#         )
+
+#         state = torch.load(
+#             model_path,
+#             map_location=self.device,
+#             weights_only=True
+#         )
+#         self.model.load_state_dict(state)
+#         self.model.to(self.device).eval()
+
+#         if USE_FP16:
+#             self.model = self.model.half()
+
+#         self.transform = transforms.Compose([
+#             transforms.Resize((224, 224)),
+#             transforms.ToTensor(),
+#             transforms.Normalize(
+#                 mean=[0.485, 0.456, 0.406],
+#                 std=[0.229, 0.224, 0.225]
+#             )
+#         ])
+
+#         self.face_detector = mp.solutions.face_detection.FaceDetection(
+#             model_selection=0,
+#             min_detection_confidence=0.6
+#         )
+
+#         self.history = deque(maxlen=SMOOTHING_WINDOW)
+#         self.conf_history = deque(maxlen=SMOOTHING_WINDOW)
+
+#     def predict(self, frame):
+#         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+#         results = self.face_detector.process(rgb)
+
+#         if not results.detections:
+#             self.history.clear()
+#             self.conf_history.clear()
+#             return None, None, None
+
+#         h, w, _ = frame.shape
+#         det = results.detections[0]
+#         box = det.location_data.relative_bounding_box
+
+#         x1 = int(box.xmin * w)
+#         y1 = int(box.ymin * h)
+#         x2 = int((box.xmin + box.width) * w)
+#         y2 = int((box.ymin + box.height) * h)
+
+#         face = frame[y1:y2, x1:x2]
+#         if face.size == 0:
+#             return None, None, None
+
+#         img = Image.fromarray(cv2.cvtColor(face, cv2.COLOR_BGR2RGB))
+#         img = self.transform(img).unsqueeze(0)
+
+#         if USE_FP16:
+#             img = img.half()
+
+#         img = img.to(self.device)
+
+#         with torch.no_grad():
+#             probs = torch.softmax(self.model(img), dim=1)[0]
+#             conf, idx = torch.max(probs, dim=0)
+
+#         conf = conf.item()
+#         idx = idx.item()
+
+#         if conf < CONF_THRESHOLD:
+#             return "Uncertain", conf, (x1, y1, x2, y2)
+
+#         self.history.append(idx)
+#         self.conf_history.append(conf)
+
+#         stable_idx = max(set(self.history), key=self.history.count)
+#         stable_conf = sum(self.conf_history) / len(self.conf_history)
+
+#         return self.labels[stable_idx], stable_conf, (x1, y1, x2, y2)
+
+
+# # ================================
+# # CAMERA LOOP
+# # ================================
+# cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+# detector = EmotionDetector("mobilenet_v3_large_best.pth")
+
+# frame_count = 0
+# last_result = (None, None, None)
+
+# print("🎥 Emotion Detection Running — Press Q to quit")
+
+# while True:
+#     ret, frame = cap.read()
+#     if not ret:
+#         break
+
+#     frame_count += 1
+
+#     if frame_count % FRAME_SKIP == 0:
+#         last_result = detector.predict(frame)
+
+#     emotion, conf, box = last_result
+
+#     if emotion is None:
+#         cv2.putText(frame, "No Face", (20, 40),
+#                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+#     else:
+#         x1, y1, x2, y2 = box
+#         color = (0, 255, 0) if emotion != "Uncertain" else (0, 255, 255)
+#         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+#         cv2.putText(
+#             frame,
+#             f"{emotion} ({conf*100:.1f}%)",
+#             (x1, y1 - 10),
+#             cv2.FONT_HERSHEY_SIMPLEX,
+#             0.9,
+#             color,
+#             2
+#         )
+
+#     cv2.imshow("Emotion Detection", frame)
+#     if cv2.waitKey(1) & 0xFF == ord('q'):
+#         break
+
+# cap.release()
+# cv2.destroyAllWindows()
 
 
 
