@@ -1,197 +1,163 @@
-# The Memory Manager / Long-term Storage.
-"Storage / Long-term Memory. Note: Your file content was empty/pseudocode."
-" For an ASD user, memory is vital for tracking triggers and successful coping strategies over time."
+# memory_manager.py  (SQLite-only)
 import json
-import os
+import sqlite3
 import time
 from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from analytics.vision_models.long_term_memory import LongTermMemoryStore  # your existing SQLite store
+
 
 class MemoryManager:
-    def __init__(self):
-        # 1. Define paths relative to this script (back/agent/memory_manager.py)
-        # We go '..' to get to 'back/', then into 'analytics/local_memory'
-        base_dir = os.path.dirname(__file__)
-        self.memory_dir = os.path.join(base_dir, '..', 'analytics', 'local_memory')
-        
-        # 2. Map to your EXISTING files shown in the screenshot
-        self.profile_path = os.path.join(self.memory_dir, "user_profile.json")
-        self.emotion_log_path = os.path.join(self.memory_dir, "emotion_log.json")
-        self.gaze_path = os.path.join(self.memory_dir, "gaze_pattern.json")
-        self.baseline_path = os.path.join(self.memory_dir, "baseline.json")
+    """
+    SQLite-backed memory manager (NO JSON files).
+    - Profile/preferences stored in LongTermMemoryStore.users.preferences_json
+    - Emotion aggregates stored in LongTermMemoryStore.emotion_daily
+    - Interaction log stored in an 'interactions' table in the same DB.
+    """
 
-    def _read_json(self, path):
-        """Helper to read JSON safely. Returns empty dict/list if file is missing/empty."""
-        if not os.path.exists(path):
-            return {}
+    def __init__(self, db_path: str = "memory.db", user_id: str = "user_001"):
+        self.user_id = user_id
+        self.store = LongTermMemoryStore(db_path)
+        self.db_path = db_path
+        self._init_interactions_table()
+
+    def _connect(self) -> sqlite3.Connection:
+        con = sqlite3.connect(self.db_path)
+        con.execute("PRAGMA journal_mode=WAL;")
+        con.execute("PRAGMA synchronous=NORMAL;")
+        return con
+
+    def _init_interactions_table(self) -> None:
+        con = self._connect()
         try:
-            with open(path, 'r') as f:
-                data = json.load(f)
-                return data
-        except json.JSONDecodeError:
-            return {} # Return empty if file is corrupt or empty
+            con.execute("""
+            CREATE TABLE IF NOT EXISTS interactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                ts REAL NOT NULL,
+                readable_time TEXT NOT NULL,
+                event_type TEXT NOT NULL,       -- 'conversation' or 'observation'
+                user_input TEXT,
+                agent_response TEXT,
+                detected_emotion TEXT,
+                confidence REAL
+            );
+            """)
+            con.execute("CREATE INDEX IF NOT EXISTS idx_interactions_user_ts ON interactions(user_id, ts);")
+            con.commit()
+        finally:
+            con.close()
 
-    def _write_json(self, path, data):
-        """Helper to write JSON safely."""
+    # --------------------------
+    # Profile / preferences
+    # --------------------------
+    def load_profile(self) -> Dict[str, Any]:
+        """
+        Returns: {"name": "...", "preferences": {...}, "triggers": [...]}
+        Stored under users.preferences_json (single JSON).
+        """
+        prefs = self.store.get_preferences(self.user_id)  # dict
+        # default structure
+        name = prefs.get("name", "User")
+        triggers = prefs.get("triggers", [])
+        preferences = prefs.get("preferences", {})
+        if not isinstance(triggers, list):
+            triggers = []
+        if not isinstance(preferences, dict):
+            preferences = {}
+        return {"name": name, "preferences": preferences, "triggers": triggers}
+
+    def save_profile(self, name: Optional[str] = None, triggers: Optional[List[str]] = None,
+                     preferences: Optional[Dict[str, Any]] = None) -> None:
+        prefs = self.store.get_preferences(self.user_id)
+        if not isinstance(prefs, dict):
+            prefs = {}
+
+        if name is not None:
+            prefs["name"] = name
+        if triggers is not None:
+            prefs["triggers"] = triggers
+        if preferences is not None:
+            prefs["preferences"] = preferences
+
+        self.store.set_preferences(self.user_id, prefs)
+
+    # --------------------------
+    # Interaction logs
+    # --------------------------
+    def save_interaction(self, user_text: str, agent_response: str, detected_emotion: str) -> None:
+        con = self._connect()
         try:
-            with open(path, 'w') as f:
-                json.dump(data, f, indent=4)
-        except Exception as e:
-            print(f"Error writing to {path}: {e}")
+            now = time.time()
+            con.execute("""
+                INSERT INTO interactions
+                (user_id, ts, readable_time, event_type, user_input, agent_response, detected_emotion, confidence)
+                VALUES (?, ?, ?, 'conversation', ?, ?, ?, NULL);
+            """, (
+                self.user_id,
+                now,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                user_text,
+                agent_response,
+                detected_emotion
+            ))
+            con.commit()
+        finally:
+            con.close()
 
+    def log_emotional_event(self, emotion: str, confidence: float = 1.0) -> None:
+        con = self._connect()
+        try:
+            now = time.time()
+            con.execute("""
+                INSERT INTO interactions
+                (user_id, ts, readable_time, event_type, user_input, agent_response, detected_emotion, confidence)
+                VALUES (?, ?, ?, 'observation', NULL, NULL, ?, ?);
+            """, (
+                self.user_id,
+                now,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                emotion,
+                float(confidence)
+            ))
+            con.commit()
+        finally:
+            con.close()
 
-    def load_profile(self):
+    def get_recent_summary(self, limit: int = 3) -> str:
+        con = self._connect()
+        try:
+            rows = con.execute("""
+                SELECT user_input, agent_response, detected_emotion
+                FROM interactions
+                WHERE user_id=? AND event_type='conversation'
+                ORDER BY ts DESC
+                LIMIT ?;
+            """, (self.user_id, int(limit))).fetchall()
+
+            if not rows:
+                return "No recent interactions."
+
+            # reverse to chronological
+            rows = list(reversed(rows))
+            lines = []
+            for u_text, a_text, emo in rows:
+                u_text = u_text or ""
+                a_text = a_text or ""
+                emo = emo or "unknown"
+                lines.append(f"- User ({emo}): {u_text} | Agent: {a_text}")
+            return "\n".join(lines)
+        finally:
+            con.close()
+
+    def find_patterns(self, days: int = 7) -> str:
         """
-        Reads from your existing 'user_profile.json'.
-        Returns the user's name, triggers, and preferences.
+        Uses emotion_daily aggregates (not raw frame logs).
         """
-        data = self._read_json(self.profile_path)
-        # If the file is empty, return a default fallback so the app doesn't crash
-        if not data:
-            return {"name": "User", "preferences": {}, "triggers": []}
-        return data
-
-    def load_baseline(self):
-        """Reads 'baseline.json' to understand the user's 'normal' state."""
-        return self._read_json(self.baseline_path)
-
-    def save_interaction(self, user_text, agent_response, detected_emotion):
-        """
-        Appends the new interaction to 'emotion_log.json'.
-        """
-        # Load existing log
-        log_data = self._read_json(self.emotion_log_path)
-        
-        # If log_data is a list, append. If it's a dict, we might need to adjust structure.
-        # Assuming it's a list of events:
-        if not isinstance(log_data, list):
-            log_data = []
-
-        new_entry = {
-            "timestamp": time.time(),
-            "readable_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "event_type": "conversation",
-            "user_input": user_text,
-            "agent_response": agent_response,
-            "detected_emotion": detected_emotion
-        }
-
-        log_data.append(new_entry)
-        
-        # Optional: Keep log size manageable (last 100 entries)
-        if len(log_data) > 100:
-            log_data = log_data[-100:]
-
-        self._write_json(self.emotion_log_path, log_data)
-
-    def get_recent_summary(self, limit=3):
-        """
-        Reads the last few entries from 'emotion_log.json' to give context to Llama.
-        """
-        log_data = self._read_json(self.emotion_log_path)
-        
-        if not log_data or not isinstance(log_data, list):
-            return "No recent interactions."
-
-        # Get last 'limit' items
-        recent_items = log_data[-limit:]
-        summary = []
-        
-        for item in recent_items:
-            # Safely get fields in case your log format varies
-            u_text = item.get("user_input", "")
-            a_text = item.get("agent_response", "")
-            emo = item.get("detected_emotion", "unknown")
-            summary.append(f"- User ({emo}): {u_text} | Agent: {a_text}")
-            
-        return "\n".join(summary)
-    
-    
-    def log_emotional_event(self, emotion, confidence=1.0):
-        """
-        Logs a passive emotional observation (e.g., camera sees 'Sad' 
-        but user hasn't said anything).
-        """
-        # Load existing log
-        log_data = self._read_json(self.emotion_log_path)
-        if not isinstance(log_data, list):
-            log_data = []
-
-        new_entry = {
-            "timestamp": time.time(),
-            "readable_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "hour": datetime.now().hour,  # Save hour specifically for pattern matching
-            "event_type": "observation",  # Distinct from 'conversation'
-            "detected_emotion": emotion,
-            "confidence": confidence
-        }
-
-        log_data.append(new_entry)
-        
-        # Keep log size manageable
-        if len(log_data) > 500: # Keep more observations than conversations
-            log_data = log_data[-500:]
-
-        self._write_json(self.emotion_log_path, log_data)
-
-
-    def find_patterns(self):
-        """
-        Analyzes emotion_log.json to find simple triggers/patterns.
-        Returns a string summary of findings.
-        """
-        log_data = self._read_json(self.emotion_log_path)
-        if not log_data:
-            return "No data to analyze."
-
-        # simple counter: { 16: {'anxious': 5, 'happy': 1}, 17: ... }
-        hour_map = {} 
-
-        for entry in log_data:
-            # We only care about negative emotions for triggers
-            emotion = entry.get("detected_emotion", "neutral")
-            if emotion in ["contempt", "sad", "fear", "angry", "disgust"]:
-                # Parse the hour if we didn't save it explicitly before
-                if "hour" in entry:
-                    hour = entry["hour"]
-                else:
-                    # Fallback for old data
-                    dt = datetime.strptime(entry["readable_time"], "%Y-%m-%d %H:%M:%S")
-                    hour = dt.hour
-                
-                if hour not in hour_map:
-                    hour_map[hour] = {}
-                hour_map[hour][emotion] = hour_map[hour].get(emotion, 0) + 1
-
-        # Generate insights
-        insights = []
-        for hour, counts in hour_map.items():
-            top_emotion = max(counts, key=counts.get)
-            count = counts[top_emotion]
-            if count >= 3: # Threshold to call it a "pattern"
-                insights.append(f"Trend: You tend to feel {top_emotion} around {hour}:00 ({count} times).")
-
-        if not insights:
+        top = self.store.get_top_emotions_last_days(self.user_id, days=int(days))
+        if not top:
             return "No strong patterns detected yet."
-        
-        return "\n".join(insights)
-
-
-# Simple test to run this file directly
-if __name__ == "__main__":
-    mm = MemoryManager()
-    print("Profile:", mm.load_profile())
-    print("\nBaseline:", mm.load_baseline())
-# Simulate a few events to test pattern recognition
-    print("Logging simulated events...")
-    mm.log_emotional_event("anxious") 
-    mm.log_emotional_event("anxious") 
-    mm.log_emotional_event("anxious") 
-    
-    print("\n--- Recent Context ---")
-    print(mm.get_recent_summary())
-    
-    print("\n--- Pattern Analysis ---")
-    print(mm.find_patterns())
-    #how to implement:
-    # Use JSON or simple text files to store user profiles and interaction logs.
-    # Trigger Mapping: Create a function log_emotional_event(emotion, time). Over time, the agent can learn patterns (e.g., "You tend to get anxious around 4 PM")
+        # Example output
+        formatted = ", ".join([f"{emo}:{cnt}" for emo, cnt in top[:4]])
+        return f"Top emotions last {days} days: {formatted}"

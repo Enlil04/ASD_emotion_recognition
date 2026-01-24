@@ -1,78 +1,34 @@
-# The Conductor / Orchestrator.
-# """ Here is the bridge
-#     Koog:  Runs workflows, Connects tools, Controls execution graph
-#     This is the entry point. It connects your "eyes" (cameras/sensors) to your "brain" (Llama). 
-#  It runs the continuous cycle of life: Sense -> Think -> Act."""
-
-# This is the main loop that ties your vision models to the agent. 
-
-# STILLL NEEDS THOUGHTS
-
-
+# koog_orchestrator.py  (SQLite + in-process vision, NO JSON polling, NO subprocess)
 import time
-import sys
-import os
-import json
-import subprocess
 import threading
-from pathlib import Path
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+import cv2
 
-from agent.react_agent import AgenticBrain
-CURRENT_DIR = Path(__file__).parent
-VISION_DIR = CURRENT_DIR.parent / "analytics" / "vision_models"
-DETECTOR_SCRIPT = VISION_DIR / "emotion_detector.py"
-LOG_FILE = VISION_DIR / "local_memory" / "emotion_log.json"
+from react_agent import AgenticBrain
+
+from analytics.vision_models.emotion_detector import EmotionDetector, MODEL_FILE, LABELS
+from analytics.vision_models.emotion_summary import EmotionSummarizer
+from analytics.vision_models.session_memory import SessionMemoryManager
+from analytics.vision_models.long_term_memory import LongTermMemoryStore, aggregate_recent_emotions, day_string_local
+from analytics.vision_models.tools.emotion_tool import get_emotion_state, get_session_state
 
 
 # This mimics what the Flutter App would send to the backend
 app_state = {
-    "current_activity": "idle",      
-    "last_event": None,               
+    "current_activity": "idle",
+    "last_event": None,
     "active_session": True,
-    "user_typed_message": None        
+    "user_typed_message": None
 }
 
-class VisionBridge:
-    #Launches emotion_detector.py as a background process and reads its JSON logs.
-    def __init__(self):
-        self.process = None
-        self.ensure_vision_system_running()
+USER_ID = "user_001"
+DB_PATH = "memory.db"
 
-    def ensure_vision_system_running(self):
-        if not DETECTOR_SCRIPT.exists():
-            print(f"CRITICAL: Vision script not found at {DETECTOR_SCRIPT}")
-            return
-        
-        print(f"Launching Vision System...")
-        # Uses the same python interpreter to run the detector
-        self.process = subprocess.Popen([sys.executable, str(DETECTOR_SCRIPT)])
-        time.sleep(3) # Warmup time for camera
+SESSION_WINDOW_SEC = 60
+FLUSH_INTERVAL_SEC = 30  # push session emotion counts -> sqlite every 30s
 
-    def detect_latest_frame(self):
-        #Reads the last known emotion from the shared JSON file
-        if not LOG_FILE.exists(): return "neutral"
-        try:
-            text_data = LOG_FILE.read_text()
-            if not text_data: return "neutral"
-            
-            data = json.loads(text_data)
-            if not data: return "neutral"
-            
-            # Return the most recent entry
-            return data[-1].get("detected_emotion", "neutral")
-        except:
-            return "neutral"
-
-    def kill(self):
-        if self.process: 
-            self.process.terminate()
-            print("Vision System closed.")
 
 def input_listener():
-    #Listens for keyboard input to simulate:
-    
     print("\n--- SIMULATION CONTROLS ---")
     print(" [TYPE TEXT]: Simulates user talking to AI")
     print(" 'g' -> Event: User starts Game")
@@ -80,119 +36,168 @@ def input_listener():
     print(" 'w' -> Event: User WINS level")
     print(" 'exit' -> Quit System")
     print("---------------------------\n")
-    
+
     while app_state["active_session"]:
-        user_in = input() # Blocking wait
-        # hard coded for now
-        if user_in.lower() in ['exit', 'quit']:
+        user_in = input()
+        if user_in.lower() in ["exit", "quit"]:
             app_state["active_session"] = False
             break
-        elif user_in == 'g':
+        elif user_in == "g":
             app_state["current_activity"] = "playing_memory_game"
             app_state["last_event"] = "game_started"
             print("📱 APP: Game Started")
-        elif user_in == 'f':
+        elif user_in == "f":
             app_state["last_event"] = "level_failed"
             print("📱 APP: Level Failed")
-        elif user_in == 'w':
+        elif user_in == "w":
             app_state["last_event"] = "level_complete"
             print("📱 APP: Level Won")
         else:
-            # Treat anything else as a direct chat message
             app_state["user_typed_message"] = user_in
 
-# --- MAIN ORCHESTRATOR LOOP ---
+
 def main_loop():
     print("Starting Orchestrator (Body)...")
-    
-    # 1. Initialize the Mind
+
+    # 1) Agent brain (uses SQLite MemoryManager internally)
     print("Loading Agentic Brain (Llama 3.2)...")
     try:
-        brain = AgenticBrain()
+        brain = AgenticBrain(db_path=DB_PATH, user_id=USER_ID)
         print("Brain Loaded.")
     except Exception as e:
         print(f"Failed to load Brain: {e}")
         brain = None
 
-    # 2. Initialize the Eyes
-    eyes = VisionBridge()
+    # 2) Vision pipeline (in-process)
+    detector = EmotionDetector(MODEL_FILE)
+    summarizer = EmotionSummarizer()
+    session_mem = SessionMemoryManager(emotion_window_sec=SESSION_WINDOW_SEC)
+    ltm = LongTermMemoryStore(DB_PATH)
 
-    # 3. Start Input Listener (Thread)
+    # 3) Camera
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("CRITICAL: Could not open webcam.")
+        return
+
+    # 4) Input listener thread
     input_thread = threading.Thread(target=input_listener, daemon=True)
     input_thread.start()
 
-    # Tracking variables for triggers
     consecutive_negative_frames = 0
-    
+    last_flush = time.time()
+
     try:
         while app_state["active_session"]:
-            # --- PHASE 1: SENSE (Gather Data) ---
-            current_emotion = eyes.detect_latest_frame()
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            # ----- PHASE 1: SENSE (frame -> detector -> summarizer -> session) -----
+            emotion, conf, box, probs = detector.predict(frame)
+            face_detected = box is not None
+
+            summarizer.update(
+                emotion=emotion,
+                conf=conf,
+                probs=probs,
+                labels=LABELS,
+                face_detected=face_detected
+            )
+            summary = summarizer.get_summary()
+            if summary is not None:
+                session_mem.update_emotion(summary)
+
+            # Flush session -> SQLite aggregates periodically
+            now = time.time()
+            if now - last_flush >= FLUSH_INTERVAL_SEC:
+                state = session_mem.get_state()
+                counts = aggregate_recent_emotions(state["recent_emotions"])
+                if counts:
+                    ltm.add_emotion_counts(USER_ID, day_string_local(), counts)
+                last_flush = now
+
+            # Tool outputs (agent-facing)
+            emotion_state = get_emotion_state(summarizer)     # best: includes face_detected/top2/etc
+            session_state = get_session_state(session_mem)    # conversation_summary/current_goal/recent_emotions
+
+            current_emotion = (emotion_state.get("dominant") or "Neutral")
             activity = app_state["current_activity"]
             event = app_state["last_event"]
             user_msg = app_state["user_typed_message"]
 
-            # Reset transient states
-            if event: app_state["last_event"] = None
-            if user_msg: app_state["user_typed_message"] = None
+            # reset transient states
+            if event:
+                app_state["last_event"] = None
+            if user_msg:
+                app_state["user_typed_message"] = None
 
-            # --- PHASE 2: EVALUATE TRIGGERS ---
+            # ----- PHASE 2: EVALUATE TRIGGERS -----
             trigger_reason = None
             prompt_text = ""
 
-            # Trigger A: User Typed Something
             if user_msg:
                 trigger_reason = "user_chat"
                 prompt_text = user_msg
 
-            # Trigger B: App Event (Win/Fail)
             elif event == "level_failed":
                 trigger_reason = "app_event"
-                # We translate the event into a sentence for the LLM
                 prompt_text = f"System Alert: The user just failed a difficult level in {activity}."
-            
+
             elif event == "level_complete":
                 trigger_reason = "app_event"
                 prompt_text = f"System Alert: The user just won the level in {activity}!"
 
-            # Trigger C: Emotional Persistence (Behavioral)
-            # If user is NOT idle, and looks negative for ~5 seconds
-            elif activity != "idle" and current_emotion in ["anger", "sad", "fear"]:
+            # Emotional persistence (use your label casing)
+            elif activity != "idle" and current_emotion in ["Anger", "Sad", "Fear"]:
                 consecutive_negative_frames += 1
-                if consecutive_negative_frames > 15: # 15 cycles * 0.5s sleep = ~7.5 seconds
+                if consecutive_negative_frames > 15:  # ~7.5 seconds if sleep=0.5
                     trigger_reason = "emotion_pattern"
-                    prompt_text = f"System Alert: The user has looked {current_emotion} for several seconds while {activity}. They may be struggling."
-                    consecutive_negative_frames = 0 # Reset so we don't spam
+                    prompt_text = (
+                        f"System Alert: The user has looked {current_emotion} for several seconds "
+                        f"while {activity}. They may be struggling."
+                    )
+                    consecutive_negative_frames = 0
             else:
-                consecutive_negative_frames = 0 # Reset if they smile or look neutral
+                consecutive_negative_frames = 0
 
-            # --- PHASE 3: THINK & ACT (If Triggered) ---
+            # ----- PHASE 3: THINK & ACT -----
             if trigger_reason and brain:
                 print(f"\nTRIGGER: {trigger_reason} | Emotion: {current_emotion}")
-                
-                # 1. Construct the Vision/Context Packet for react_agent.py
+
                 vision_packet = {
                     "emotion": current_emotion,
-                    "gaze": "screen_center", # Placeholder for iris data
+                    "gaze": "screen_center",
                     "iris": "normal",
                     "timestamp": time.time()
                 }
 
-                # 2. Call the ReAct Agent
-                response_speech = brain.decide_response(vision_packet, prompt_text)
-                
-                # 3. Output the Result
-                print(f"COMPANION: \"{response_speech}\"")
+                # extra context for the reasoner
+                extra_context = {
+                    "emotion_state": emotion_state,
+                    "session_state": session_state,
+                    "top_emotions_7d": ltm.get_top_emotions_last_days(USER_ID, 7),
+                }
+
+                response_speech = brain.decide_response(vision_packet, prompt_text, extra_context=extra_context)
+
+                print(f'COMPANION: "{response_speech}"')
                 print("------------------------------------------------")
 
-            
+            # Optional: show camera window
+            cv2.imshow("Orchestrator", frame)
+            if cv2.waitKey(1) & 0xFF == 27:
+                break
+
             time.sleep(0.5)
 
     except KeyboardInterrupt:
         print("\nShutting down...")
     finally:
-        eyes.kill()
+        cap.release()
+        cv2.destroyAllWindows()
         app_state["active_session"] = False
+
 
 if __name__ == "__main__":
     main_loop()
