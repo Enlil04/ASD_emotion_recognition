@@ -1,11 +1,26 @@
-# memory_manager.py  (SQLite-only)
-import json
+import sys
+import os
+
+# Get the path to the current directory (agent)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# Get the parent directory (back)
+parent_dir = os.path.dirname(current_dir)
+# Add 'back' to the system path so Python can find 'analytics'
+sys.path.append(parent_dir)
+
+# --- YOUR EXISTING IMPORTS BELOW ---
 import sqlite3
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+<<<<<<< HEAD
 from analytics.vision_models.long_term_memory import LongTermMemoryStore  # your existing SQLite store
 
+=======
+
+# This will now work
+from analytics.vision_models.local_memory.long_term_memory import LongTermMemoryStore
+>>>>>>> 8e35c0d7cb8c6ab1075f672816fbdd08d72a0a33
 
 class MemoryManager:
     """

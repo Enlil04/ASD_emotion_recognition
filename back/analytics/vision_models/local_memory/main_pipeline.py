@@ -1,10 +1,11 @@
+""" connects the emotion detection, summarization, session memory, and long-term memory modules. """
 import cv2
 import time
 
 from emotion_detector import EmotionDetector, LABELS, MODEL_FILE
-from emotion_summary import EmotionSummarizer
-from session_memory import SessionMemoryManager
-from long_term_memory import LongTermMemoryStore, aggregate_recent_emotions, day_string_local
+from back.analytics.vision_models.local_memory.emotion_summary import EmotionSummarizer
+from back.analytics.vision_models.local_memory.session_memory import SessionMemoryManager
+from back.analytics.vision_models.local_memory.long_term_memory import LongTermMemoryStore, aggregate_recent_emotions, day_string_local
 from tools.emotion_tool import get_emotion_state, get_session_state
 
 USER_ID = "user_001"  # later: per-login user id

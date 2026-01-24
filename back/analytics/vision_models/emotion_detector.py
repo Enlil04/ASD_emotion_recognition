@@ -7,7 +7,6 @@ from PIL import Image
 from collections import deque
 import numpy as np
 
-
 # ==============================
 # CONFIGURATION
 # ==============================
@@ -180,20 +179,21 @@ class EmotionDetector:
             weighted[LABELS.index("Sad")] *= 0.1
             weighted[LABELS.index("Happy")] *= 8.0
 
-        # Sise with closed mouthurpr
+        # Surprise with closed mouth
         if temp_emotion == "Surprise" and mouth_open < 0.25:
             weighted[LABELS.index("Surprise")] *= 0.0
             weighted[LABELS.index("Happy")] *= 3.0
 
-            # Disgust as smile
-            if temp_emotion == "Disgust" and avg[LABELS.index("Happy")] > 0.1:
-                weighted[LABELS.index("Disgust")] *= 0.1
-                weighted[LABELS.index("Happy")] *= 3.0
+        # Disgust as smile
+        if temp_emotion == "Disgust" and avg[LABELS.index("Happy")] > 0.1:
+            weighted[LABELS.index("Disgust")] *= 0.1
+            weighted[LABELS.index("Happy")] *= 3.0
 
         # 🔥 CLOSED-MOUTH SMILE FIX
         if temp_emotion == "Sad" and smile_width > 0.42:
             weighted[LABELS.index("Sad")] *= 0.05
             weighted[LABELS.index("Happy")] *= 12.0
+
         # =========================================================
 
         total = weighted.sum()
@@ -265,5 +265,3 @@ if __name__ == "__main__":
 
     cap.release()
     cv2.destroyAllWindows()
-
-
