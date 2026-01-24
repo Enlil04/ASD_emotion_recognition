@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from analytics.vision_models.long_term_memory import LongTermMemoryStore  # your existing SQLite store
+from back.analytics.vision_models.local_memory.long_term_memory import LongTermMemoryStore  # your existing SQLite store
 
 
 class MemoryManager:

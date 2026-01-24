@@ -7,9 +7,9 @@ import cv2
 from react_agent import AgenticBrain
 
 from analytics.vision_models.emotion_detector import EmotionDetector, MODEL_FILE, LABELS
-from analytics.vision_models.emotion_summary import EmotionSummarizer
-from analytics.vision_models.session_memory import SessionMemoryManager
-from analytics.vision_models.long_term_memory import LongTermMemoryStore, aggregate_recent_emotions, day_string_local
+from back.analytics.vision_models.local_memory.emotion_summary import EmotionSummarizer
+from back.analytics.vision_models.local_memory.session_memory import SessionMemoryManager
+from back.analytics.vision_models.local_memory.long_term_memory import LongTermMemoryStore, aggregate_recent_emotions, day_string_local
 from analytics.vision_models.tools.emotion_tool import get_emotion_state, get_session_state
 
 
