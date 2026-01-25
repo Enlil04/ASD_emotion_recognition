@@ -1,3 +1,12 @@
+"""
+MEMORY MANAGER (HIGH-LEVEL CONTROLLER)
+--------------------------------------
+This module provides a simplified, high-level API for the Agent to interact 
+with the database. It handles user profiles, logs conversation history, 
+and retrieves summarized insights (patterns) without exposing raw SQL queries 
+to the rest of the application.
+"""
+
 import sys
 import os
 
@@ -18,17 +27,15 @@ from typing import Any, Dict, List, Optional
 from analytics.vision_models.local_memory.long_term_memory import LongTermMemoryStore
 
 class MemoryManager:
-    """
-    SQLite-backed memory manager (NO JSON files).
-    - Profile/preferences stored in LongTermMemoryStore.users.preferences_json
-    - Emotion aggregates stored in LongTermMemoryStore.emotion_daily
-    - Interaction log stored in an 'interactions' table in the same DB.
-    """
-
-    def __init__(self, db_path: str = "memory.db", user_id: str = "user_001"):
+    def __init__(self, db_path=None, user_id="user_001"):
+        # SAFETY NET: If no path is provided, find the data folder automatically
+        if db_path is None:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            db_path = os.path.join(base_dir, "data", "memory.db")
+            
+        self.db_path = db_path
         self.user_id = user_id
         self.store = LongTermMemoryStore(db_path)
-        self.db_path = db_path
         self._init_interactions_table()
 
     def _connect(self) -> sqlite3.Connection:

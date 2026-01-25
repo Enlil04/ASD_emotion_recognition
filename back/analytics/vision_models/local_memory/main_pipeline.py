@@ -1,4 +1,10 @@
-""" connects the emotion detection, summarization, session memory, and long-term memory modules. """
+"""
+MAIN PIPELINE ORCHESTRATOR
+--------------------------
+The entry point script. It initializes the camera, runs the detection loop, 
+feeds data through the summarizer and memory modules, and manages the 
+visualization window.
+"""
 import cv2
 import time
 

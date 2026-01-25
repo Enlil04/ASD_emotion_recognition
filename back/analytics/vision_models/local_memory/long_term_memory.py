@@ -1,155 +1,160 @@
+"""
+LONG-TERM MEMORY (PERSISTENCE)
+------------------------------
+This module manages the SQLite database for persistent storage. It handles 
+user preferences and aggregates daily emotion counts (long-term trends), 
+ensuring data survives after the program restarts.
+"""
 import sqlite3
-import json
 import time
-from typing import Dict, Any, Optional, List, Tuple
-
+import json
+from datetime import datetime, timedelta
 
 class LongTermMemoryStore:
-    """
-    Persistent per-user memory using SQLite.
+    def __init__(self, db_path):
+        # 1. Store the path
+        self.db_path = db_path  
+        
+        # 2. Connect to the database
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.cursor = self.conn.cursor()
+        self._create_tables()
 
-    Stores:
-      - users.preferences_json (small personalization settings)
-      - emotion_daily counts per day per emotion (aggregated, not raw logs)
-    """
+    def _create_tables(self):
+        """
+        Creates the necessary tables if they don't exist.
+        """
+        # Table 1: Aggregated Daily Stats
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS daily_emotion_stats (
+                user_id TEXT,
+                date_str TEXT,
+                emotion_counts TEXT,
+                total_frames INTEGER,
+                PRIMARY KEY (user_id, date_str)
+            )
+        """)
+        
+        # Table 2: Significant Events
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS significant_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT,
+                timestamp REAL,
+                event_type TEXT,
+                description TEXT,
+                context_json TEXT
+            )
+        """)
 
-    def __init__(self, db_path: str = "memory.db"):
-        self.db_path = db_path
-        self._init_db()
-
-    def _connect(self) -> sqlite3.Connection:
-        con = sqlite3.connect(self.db_path)
-        con.execute("PRAGMA journal_mode=WAL;")       # safer concurrent writes
-        con.execute("PRAGMA synchronous=NORMAL;")
-        return con
-
-    def _init_db(self) -> None:
-        con = self._connect()
-        try:
-            con.execute("""
-            CREATE TABLE IF NOT EXISTS users (
+        # Table 3: User Profiles (Preferred Name, Triggers, etc.)
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_profiles (
                 user_id TEXT PRIMARY KEY,
-                preferences_json TEXT NOT NULL DEFAULT '{}',
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            );
-            """)
-            con.execute("""
-            CREATE TABLE IF NOT EXISTS emotion_daily (
-                user_id TEXT NOT NULL,
-                day TEXT NOT NULL,            -- YYYY-MM-DD (local)
-                emotion TEXT NOT NULL,
-                count INTEGER NOT NULL,
-                updated_at REAL NOT NULL,
-                PRIMARY KEY (user_id, day, emotion),
-                FOREIGN KEY (user_id) REFERENCES users(user_id)
-            );
-            """)
-            con.commit()
-        finally:
-            con.close()
+                preferences_json TEXT
+            )
+        """)
+        
+        self.conn.commit()
 
-    # ---------- Users / preferences ----------
-    def ensure_user(self, user_id: str) -> None:
-        now = time.time()
-        con = self._connect()
-        try:
-            con.execute("""
-            INSERT INTO users (user_id, preferences_json, created_at, updated_at)
+    # --- MISSING METHOD ADDED HERE ---
+    def get_preferences(self, user_id):
+        """
+        Retrieves the user's profile/preferences.
+        Returns a dict (e.g., {'name': 'Nimi', 'triggers': ['loud noises']})
+        """
+        self.cursor.execute("SELECT preferences_json FROM user_profiles WHERE user_id=?", (user_id,))
+        row = self.cursor.fetchone()
+        
+        if row:
+            try:
+                return json.loads(row[0])
+            except json.JSONDecodeError:
+                return {}
+        else:
+            # If no profile exists yet, return a safe default
+            return {"name": "User", "triggers": []}
+
+    def update_preferences(self, user_id, new_prefs: dict):
+        """
+        Saves/Updates user preferences.
+        """
+        # Get existing to merge
+        current = self.get_preferences(user_id)
+        current.update(new_prefs)
+        
+        self.cursor.execute("""
+            INSERT OR REPLACE INTO user_profiles (user_id, preferences_json)
+            VALUES (?, ?)
+        """, (user_id, json.dumps(current)))
+        self.conn.commit()
+
+    def add_emotion_counts(self, user_id, date_str, new_counts):
+        """
+        Updates the daily aggregate for a specific user.
+        """
+        self.cursor.execute("SELECT emotion_counts, total_frames FROM daily_emotion_stats WHERE user_id=? AND date_str=?", (user_id, date_str))
+        row = self.cursor.fetchone()
+
+        if row:
+            existing_counts = json.loads(row[0])
+            total_frames = row[1]
+            for emo, count in new_counts.items():
+                existing_counts[emo] = existing_counts.get(emo, 0) + count
+                total_frames += count
+        else:
+            existing_counts = new_counts
+            total_frames = sum(new_counts.values())
+
+        self.cursor.execute("""
+            INSERT OR REPLACE INTO daily_emotion_stats (user_id, date_str, emotion_counts, total_frames)
             VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET updated_at=excluded.updated_at;
-            """, (user_id, "{}", now, now))
-            con.commit()
-        finally:
-            con.close()
+        """, (user_id, date_str, json.dumps(existing_counts), total_frames))
+        self.conn.commit()
 
-    def get_preferences(self, user_id: str) -> Dict[str, Any]:
-        self.ensure_user(user_id)
-        con = self._connect()
-        try:
-            row = con.execute(
-                "SELECT preferences_json FROM users WHERE user_id=?;",
-                (user_id,)
-            ).fetchone()
-            return json.loads(row[0]) if row and row[0] else {}
-        finally:
-            con.close()
-
-    def set_preferences(self, user_id: str, prefs: Dict[str, Any]) -> None:
-        self.ensure_user(user_id)
-        now = time.time()
-        con = self._connect()
-        try:
-            con.execute("""
-            UPDATE users
-            SET preferences_json=?, updated_at=?
-            WHERE user_id=?;
-            """, (json.dumps(prefs, ensure_ascii=False), now, user_id))
-            con.commit()
-        finally:
-            con.close()
-
-    # ---------- Emotion aggregates ----------
-    def add_emotion_counts(self, user_id: str, day: str, counts: Dict[str, int]) -> None:
+    def get_top_emotions_last_days(self, user_id, days=7):
         """
-        counts example: {"Sad": 12, "Happy": 3}
+        Returns the most frequent emotions over the last X days.
         """
-        self.ensure_user(user_id)
-        now = time.time()
-        con = self._connect()
-        try:
-            for emotion, inc in counts.items():
-                if inc <= 0:
-                    continue
-                con.execute("""
-                INSERT INTO emotion_daily (user_id, day, emotion, count, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(user_id, day, emotion)
-                DO UPDATE SET
-                    count = count + excluded.count,
-                    updated_at = excluded.updated_at;
-                """, (user_id, day, emotion, int(inc), now))
-            con.commit()
-        finally:
-            con.close()
+        start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        
+        self.cursor.execute("""
+            SELECT emotion_counts FROM daily_emotion_stats 
+            WHERE user_id=? AND date_str >= ?
+        """, (user_id, start_date))
+        
+        rows = self.cursor.fetchall()
+        if not rows:
+            return "No recent data."
 
-    def get_top_emotions_last_days(self, user_id: str, days: int = 7) -> List[Tuple[str, int]]:
-        """
-        Returns list of (emotion, total_count) for last N days.
-        NOTE: This query expects you to pass day strings consistently as YYYY-MM-DD.
-        """
-        self.ensure_user(user_id)
-        con = self._connect()
-        try:
-            rows = con.execute("""
-            SELECT emotion, SUM(count) as total
-            FROM emotion_daily
-            WHERE user_id=?
-              AND day >= date('now', ?)
-            GROUP BY emotion
-            ORDER BY total DESC;
-            """, (user_id, f"-{int(days)} day")).fetchall()
-            return [(r[0], int(r[1])) for r in rows]
-        finally:
-            con.close()
+        grand_total = {}
+        for row in rows:
+            day_counts = json.loads(row[0])
+            for emo, count in day_counts.items():
+                grand_total[emo] = grand_total.get(emo, 0) + count
 
-# helpers for flushing session emotions -> SQLite aggregates
+        sorted_emotions = sorted(grand_total.items(), key=lambda x: x[1], reverse=True)
+        return ", ".join([f"{k} ({v})" for k, v in sorted_emotions[:3]])
 
-def day_string_local() -> str:
-    # Simple local day stamp; good enough for prototype
-    # (If you need Baghdad timezone correctness across systems, use zoneinfo later.)
-    return time.strftime("%Y-%m-%d", time.localtime())
+    def log_significant_event(self, user_id, event_type, description, context=None):
+        timestamp = time.time()
+        context_json = json.dumps(context) if context else "{}"
+        
+        self.cursor.execute("""
+            INSERT INTO significant_events (user_id, timestamp, event_type, description, context_json)
+            VALUES (?, ?, ?, ?, ?)
+        """, (user_id, timestamp, event_type, description, context_json))
+        self.conn.commit()
 
-def aggregate_recent_emotions(recent_emotions: list) -> Dict[str, int]:
-    """
-    Input: list of dicts like SessionMemoryManager.get_state()["recent_emotions"]
-    Output: counts per dominant emotion (ignoring uncertain or None)
-    """
-    counts: Dict[str, int] = {}
-    for e in recent_emotions:
-        dom = e.get("dominant")
-        uncertain = bool(e.get("uncertain"))
-        if dom is None or uncertain:
-            continue
-        counts[dom] = counts.get(dom, 0) + 1
+    def close(self):
+        self.conn.close()
+
+# Helper functions
+def day_string_local():
+    return datetime.now().strftime("%Y-%m-%d")
+
+def aggregate_recent_emotions(recent_emotions_list):
+    counts = {}
+    for emo in recent_emotions_list:
+        counts[emo] = counts.get(emo, 0) + 1
     return counts
