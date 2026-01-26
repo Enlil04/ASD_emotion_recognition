@@ -13,14 +13,8 @@ import sqlite3
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-<<<<<<< HEAD
-from analytics.vision_models.long_term_memory import LongTermMemoryStore  # your existing SQLite store
-
-=======
-
-# This will now work
 from analytics.vision_models.local_memory.long_term_memory import LongTermMemoryStore
->>>>>>> 8e35c0d7cb8c6ab1075f672816fbdd08d72a0a33
+
 
 class MemoryManager:
     """
