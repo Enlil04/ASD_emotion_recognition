@@ -6,11 +6,29 @@ from torchvision import models, transforms
 from PIL import Image
 from collections import deque
 import numpy as np
+ 
+
+import os
+
+# 1. Start from this script's location
+base_path = os.path.dirname(os.path.abspath(__file__))
+
+# 2. Try to find the file
+MODEL_FILE = os.path.join(base_path, "mobilenet_v3_large_affectnet7_.pth")
+
+# 3. If it fails, check if we accidentally went too deep
+if not os.path.exists(MODEL_FILE):
+    # This checks one level up just in case
+    alternative_path = os.path.join(os.path.dirname(base_path), "mobilenet_v3_large_affectnet7_.pth")
+    if os.path.exists(alternative_path):
+        MODEL_FILE = alternative_path
+
+print(f"Final Model Path Target: {MODEL_FILE}")
 
 # ==============================
 # CONFIGURATION
 # ==============================
-MODEL_FILE = "mobilenet_v3_large_affectnet7_.pth"
+#MODEL_FILE = "mobilenet_v3_large_affectnet7_.pth"
 SMOOTHING_WINDOW = 6
 
 LABELS = ['Anger', 'Disgust', 'Fear', 'Happy', 'Neutral', 'Sad', 'Surprise']

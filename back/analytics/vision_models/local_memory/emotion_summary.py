@@ -1,3 +1,11 @@
+"""
+EMOTION SUMMARIZER (SIGNAL STABILIZATION)
+-----------------------------------------
+This module consumes raw, noisy frame-by-frame predictions from the detector 
+and smooths them into a stable 1Hz signal. It calculates stability scores 
+and filters out uncertain predictions.
+"""
+
 import time
 from collections import deque
 from dataclasses import dataclass

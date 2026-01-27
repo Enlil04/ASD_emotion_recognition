@@ -1,3 +1,11 @@
+"""
+SESSION MEMORY (SHORT-TERM CONTEXT)
+-----------------------------------
+This module manages the in-memory state for the current interaction. 
+It holds a sliding window of recent emotions, the current conversation goal, 
+and summaries. This data is transient (RAM only).
+"""
+
 from dataclasses import dataclass, field
 from typing import List, Optional
 import time

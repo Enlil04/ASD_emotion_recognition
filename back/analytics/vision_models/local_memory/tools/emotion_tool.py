@@ -1,3 +1,10 @@
+"""
+AGENT INTERFACE TOOLS
+---------------------
+This module provides the interface functions (tools) that the AI Agent calls 
+to retrieve the current emotional state and session context. It sanitizes 
+internal data structures into JSON-ready formats.
+"""
 from typing import Any, Dict
 
 

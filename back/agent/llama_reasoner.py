@@ -1,11 +1,17 @@
-# llama_reasoner.py
+"""
+LLAMA REASONER (THE BRAIN)
+--------------------------
+This module handles high-level cognition. It wraps the interface to the LLM 
+(Ollama), constructing context-aware prompts from sensor data and memory, 
+and parsing the AI's response into structured JSON commands for the system to act on.
+"""
 import ollama
 import json
 import re
 
 
 class LlamaReasoner:
-    def __init__(self, model_name="llama3.2"):
+    def __init__(self, model_name="llama3.2:3b"):
         self.model = model_name
 
     def think(self, context_data, user_prompt):
