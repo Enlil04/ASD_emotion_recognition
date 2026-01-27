@@ -11,17 +11,24 @@ class CameraScreen extends StatefulWidget {
   State<CameraScreen> createState() => _CameraScreenState();
 }
 
-class _CameraScreenState extends State<CameraScreen> {
+class _CameraScreenState extends State<CameraScreen> with AutomaticKeepAliveClientMixin {
   CameraController? _controller;
   bool _isCameraInitialized = false;
   
   // STATE VARIABLES
   bool _isRecording = false; 
   bool _isAnalyzing = false; 
-  int _timeLeft = 10;         // Set to 10 seconds
+  int _timeLeft = 10;
   Timer? _timer;
 
-  List<Map<String, dynamic>> _recentSessions = [];
+  // 1. STATIC MEMORY (The Fix)
+  // By adding 'static', this list belongs to the App, not the Screen.
+  // It will survive when you switch tabs.
+  static List<Map<String, dynamic>> _recentSessions = [];
+
+  // 2. KEEP ALIVE (To prevent camera lag when switching)
+  @override
+  bool get wantKeepAlive => true;
 
   @override
   void initState() {
@@ -30,16 +37,22 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   Future<void> _initializeCamera() async {
+    // Check if controller is already initialized to prevent lag
+    if (_controller != null && _controller!.value.isInitialized) {
+      if (mounted) setState(() => _isCameraInitialized = true);
+      return;
+    }
+
+    if (_isCameraInitialized) return; 
+
     try {
       final cameras = await availableCameras();
       
       if (cameras.isEmpty) {
-        print("❌ No cameras found on device!");
+        debugPrint("❌ No cameras found on device!");
         return;
       }
 
-      // SAFELY FIND A CAMERA:
-      // Try to find the front camera, but if it doesn't exist, just use the first one (Back).
       CameraDescription camera = cameras.first;
       for (var cam in cameras) {
         if (cam.lensDirection == CameraLensDirection.front) {
@@ -51,14 +64,17 @@ class _CameraScreenState extends State<CameraScreen> {
       _controller = CameraController(
         camera, 
         ResolutionPreset.medium, 
-        enableAudio: false,
+        enableAudio: false, 
       );
 
       await _controller!.initialize();
-      if (mounted) setState(() => _isCameraInitialized = true);
+      
+      if (mounted) {
+        setState(() => _isCameraInitialized = true);
+      }
       
     } catch (e) {
-      print("❌ Camera Initialization Error: $e");
+      debugPrint("❌ Camera Initialization Error: $e");
     }
   }
 
@@ -69,7 +85,6 @@ class _CameraScreenState extends State<CameraScreen> {
     super.dispose();
   }
 
-  // --- 1. START THE 10-SECOND SESSION ---
   void _startSession() async {
     if (!_isCameraInitialized || _isRecording || _isAnalyzing) return;
 
@@ -78,23 +93,24 @@ class _CameraScreenState extends State<CameraScreen> {
       
       setState(() {
         _isRecording = true;
-        _timeLeft = 10; // Ensure starts at 10
+        _timeLeft = 10; 
       });
 
       _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
-        if (_timeLeft > 0) {
-          setState(() => _timeLeft--);
-        } else {
-          _stopSession(); 
+        if (mounted) {
+          if (_timeLeft > 0) {
+            setState(() => _timeLeft--);
+          } else {
+            _stopSession(); 
+          }
         }
       });
 
     } catch (e) {
-      print("Error starting: $e");
+      debugPrint("Error starting: $e");
     }
   }
 
-  // --- 2. STOP & SEND TO PYTHON ---
   void _stopSession() async {
     _timer?.cancel();
     if (!_isRecording) return;
@@ -111,25 +127,32 @@ class _CameraScreenState extends State<CameraScreen> {
       Map<String, dynamic> result = await ApiService.analyzeSession(videoFile.path);
       
       String emotion = result['dominant_emotion'] ?? "Unknown";
+      dynamic rawConf = result['confidence'] ?? 0;
+      int confidence = (rawConf is double) ? rawConf.toInt() : (rawConf as int);
       
-      setState(() {
-        _isAnalyzing = false;
-        _timeLeft = 10; // Reset for next time
-        
-        _recentSessions.insert(0, {
-          "label": emotion,
-          "confidence": result['confidence'] ?? 0,
-          "time": _getCurrentTime(),
-          "color": _getColorForEmotion(emotion),
+      if (mounted) {
+        setState(() {
+          _isAnalyzing = false;
+          _timeLeft = 10; 
+          
+          // Save to the static list
+          _recentSessions.insert(0, {
+            "label": emotion,
+            "confidence": confidence,
+            "time": _getCurrentTime(),
+            "color": _getColorForEmotion(emotion),
+          });
         });
-      });
+      }
 
     } catch (e) {
-      print("Error stopping: $e");
-      setState(() {
-        _isRecording = false;
-        _isAnalyzing = false;
-      });
+      debugPrint("Error stopping: $e");
+      if (mounted) {
+        setState(() {
+          _isRecording = false;
+          _isAnalyzing = false;
+        });
+      }
     }
   }
 
@@ -151,6 +174,8 @@ class _CameraScreenState extends State<CameraScreen> {
 
   @override
   Widget build(BuildContext context) {
+    super.build(context); // REQUIRED FOR MIXIN
+
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
@@ -276,7 +301,7 @@ class _CameraScreenState extends State<CameraScreen> {
             if (!_isRecording && !_isAnalyzing)
               const Padding(
                 padding: EdgeInsets.only(bottom: 20),
-                child: Text("Tap to start 10s Session", style: TextStyle(color: AppColors.textDark)), // Updated text
+                child: Text("Tap to start 10s Session", style: TextStyle(color: AppColors.textDark)),
               )
           ],
         ),
@@ -306,7 +331,7 @@ class _CameraScreenState extends State<CameraScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  "${data['label']} (${data['confidence'].toInt()}%)", 
+                  "${data['label']} (${data['confidence']}%)", 
                   style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: AppColors.textDark)
                 ),
                 Text("Session at ${data['time']}", style: TextStyle(fontSize: 12, color: AppColors.textDark.withOpacity(0.6))),

@@ -9,27 +9,38 @@ class NimiScreen extends StatefulWidget {
   State<NimiScreen> createState() => _NimiScreenState();
 }
 
-class _NimiScreenState extends State<NimiScreen> {
+class _NimiScreenState extends State<NimiScreen> with AutomaticKeepAliveClientMixin {
   final TextEditingController _textController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   
   bool _isTyping = false;
 
-  // 1. STATIC MEMORY: This list lives "outside" the screen.
-  // We initialize it empty so we can set the dynamic time later.
+  // 1. STATIC MEMORY
+  // Keeps data alive even if the screen is destroyed and rebuilt.
   static List<Chats> chats = [];
+
+  // 2. REQUIRED FOR MIXIN
+  @override
+  bool get wantKeepAlive => true;
 
   @override
   void initState() {
     super.initState();
-    // 2. DYNAMIC START TIME
-    // Only add the welcome message if the list is completely empty.
+    
+    // Initial Welcome Message
     if (chats.isEmpty) {
       chats.add(Chats(
         text: "What's on your mind?", 
         time: _getCurrentTime(), 
         isUser: false
       ));
+    } else {
+      // 3. FIX FOR SCROLLING UP:
+      // If we already have chats (returning from another tab), 
+      // wait for the frame to build, then jump to the bottom.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _scrollToBottom(immediate: true);
+      });
     }
   }
 
@@ -46,45 +57,40 @@ class _NimiScreenState extends State<NimiScreen> {
 
     _textController.clear();
     
-    // A. Add User Message
     setState(() {
       chats.add(Chats(text: text, time: _getCurrentTime(), isUser: true));
       _isTyping = true; 
     });
-    _scrollToBottom();
+    
+    // Smooth scroll for sending
+    _scrollToBottom(immediate: false);
 
     try {
-      // B. Send to Python
-      // We use a try-catch block so the app doesn't crash if server is down
       String response = await ApiService.sendMessage(text);
 
-      // C. SAVE TO MEMORY (CRITICAL FIX)
-      // We add the message to the static list IMMEDIATELY.
-      // This happens even if you have navigated away to another tab!
+      // Save to static list immediately
       chats.add(Chats(
         text: response, 
         time: _getCurrentTime(), 
         isUser: false
       ));
 
-      // D. Update UI (Only if you are still looking at the screen)
       if (mounted) {
         setState(() {
           _isTyping = false; 
         });
-        _scrollToBottom();
+        _scrollToBottom(immediate: false);
       } else {
-        // If you left the screen, we just turn off the typing flag silently
         _isTyping = false; 
       }
 
     } catch (e) {
-      // Handle server error gracefully
       if (mounted) {
         setState(() {
           _isTyping = false;
           chats.add(Chats(text: "Server error: Is Python running?", time: _getCurrentTime(), isUser: false));
         });
+        _scrollToBottom(immediate: false);
       }
     }
   }
@@ -94,20 +100,30 @@ class _NimiScreenState extends State<NimiScreen> {
     return "${now.hour}:${now.minute.toString().padLeft(2, '0')}";
   }
 
-  void _scrollToBottom() {
+  // 4. UPDATED SCROLL LOGIC
+  // Added 'immediate' flag. 
+  // - True: Jumps instantly (used when opening the tab).
+  // - False: Animates smoothly (used when sending messages).
+  void _scrollToBottom({required bool immediate}) {
     Future.delayed(const Duration(milliseconds: 100), () {
       if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
-        );
+        if (immediate) {
+          _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+        } else {
+          _scrollController.animateTo(
+            _scrollController.position.maxScrollExtent,
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOut,
+          );
+        }
       }
     });
   }
 
   @override
   Widget build(BuildContext context) {
+    super.build(context); // Required for Mixin
+    
     return Scaffold(
       backgroundColor: AppColors.blue.withOpacity(0.08),
       appBar: _builderAppBar(),
@@ -118,6 +134,8 @@ class _NimiScreenState extends State<NimiScreen> {
             Expanded(
               child: ListView.builder(
                 controller: _scrollController,
+                // Add this Key to help Flutter remember scroll position if possible
+                key: const PageStorageKey('nimi_chat_list'), 
                 itemCount: chats.length + (_isTyping ? 1 : 0),
                 itemBuilder: (context, index) {
                   if (_isTyping && index == chats.length) {
