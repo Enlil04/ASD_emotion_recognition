@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_application_1/theme/app_colors.dart';
-// CHANGE THIS IMPORT to match where you put the api_service.dart file
-import '/services/api_service.dart'; 
+import '/services/api_service.dart';
 
 class NimiScreen extends StatefulWidget {
   const NimiScreen({super.key});
@@ -10,14 +9,40 @@ class NimiScreen extends StatefulWidget {
   State<NimiScreen> createState() => _NimiScreenState();
 }
 
-class _NimiScreenState extends State<NimiScreen> {
-  // 1. Controllers for Input and Scrolling
+class _NimiScreenState extends State<NimiScreen> with AutomaticKeepAliveClientMixin {
   final TextEditingController _textController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
+  
+  bool _isTyping = false;
 
-  List<Chats> chats = [
-    Chats(text: "What's on your mind?", time: "10:30 AM", isUser: false),
-  ];
+  // 1. STATIC MEMORY
+  // Keeps data alive even if the screen is destroyed and rebuilt.
+  static List<Chats> chats = [];
+
+  // 2. REQUIRED FOR MIXIN
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  void initState() {
+    super.initState();
+    
+    // Initial Welcome Message
+    if (chats.isEmpty) {
+      chats.add(Chats(
+        text: "What's on your mind?", 
+        time: _getCurrentTime(), 
+        isUser: false
+      ));
+    } else {
+      // 3. FIX FOR SCROLLING UP:
+      // If we already have chats (returning from another tab), 
+      // wait for the frame to build, then jump to the bottom.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _scrollToBottom(immediate: true);
+      });
+    }
+  }
 
   @override
   void dispose() {
@@ -26,35 +51,47 @@ class _NimiScreenState extends State<NimiScreen> {
     super.dispose();
   }
 
-  // 2. Logic to Send Message to Python Backend
   void _handleSend() async {
     final text = _textController.text.trim();
     if (text.isEmpty) return;
 
-    // A. Update UI immediately (Optimistic UI)
     _textController.clear();
+    
     setState(() {
-      chats.add(Chats(
-        text: text,
-        time: _getCurrentTime(),
-        isUser: true,
-      ));
+      chats.add(Chats(text: text, time: _getCurrentTime(), isUser: true));
+      _isTyping = true; 
     });
-    _scrollToBottom();
+    
+    // Smooth scroll for sending
+    _scrollToBottom(immediate: false);
 
-    // B. Send to Python API
-    String response = await ApiService.sendMessage(text);
+    try {
+      String response = await ApiService.sendMessage(text);
 
-    // C. Update UI with Agent Response
-    if (mounted) {
-      setState(() {
-        chats.add(Chats(
-          text: response,
-          time: _getCurrentTime(),
-          isUser: false,
-        ));
-      });
-      _scrollToBottom();
+      // Save to static list immediately
+      chats.add(Chats(
+        text: response, 
+        time: _getCurrentTime(), 
+        isUser: false
+      ));
+
+      if (mounted) {
+        setState(() {
+          _isTyping = false; 
+        });
+        _scrollToBottom(immediate: false);
+      } else {
+        _isTyping = false; 
+      }
+
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isTyping = false;
+          chats.add(Chats(text: "Server error: Is Python running?", time: _getCurrentTime(), isUser: false));
+        });
+        _scrollToBottom(immediate: false);
+      }
     }
   }
 
@@ -63,20 +100,30 @@ class _NimiScreenState extends State<NimiScreen> {
     return "${now.hour}:${now.minute.toString().padLeft(2, '0')}";
   }
 
-  void _scrollToBottom() {
+  // 4. UPDATED SCROLL LOGIC
+  // Added 'immediate' flag. 
+  // - True: Jumps instantly (used when opening the tab).
+  // - False: Animates smoothly (used when sending messages).
+  void _scrollToBottom({required bool immediate}) {
     Future.delayed(const Duration(milliseconds: 100), () {
       if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
-        );
+        if (immediate) {
+          _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+        } else {
+          _scrollController.animateTo(
+            _scrollController.position.maxScrollExtent,
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOut,
+          );
+        }
       }
     });
   }
 
   @override
   Widget build(BuildContext context) {
+    super.build(context); // Required for Mixin
+    
     return Scaffold(
       backgroundColor: AppColors.blue.withOpacity(0.08),
       appBar: _builderAppBar(),
@@ -86,9 +133,14 @@ class _NimiScreenState extends State<NimiScreen> {
           children: [
             Expanded(
               child: ListView.builder(
-                controller: _scrollController, // Attach ScrollController
-                itemCount: chats.length,
+                controller: _scrollController,
+                // Add this Key to help Flutter remember scroll position if possible
+                key: const PageStorageKey('nimi_chat_list'), 
+                itemCount: chats.length + (_isTyping ? 1 : 0),
                 itemBuilder: (context, index) {
+                  if (_isTyping && index == chats.length) {
+                    return _buildLoadingBubble();
+                  }
                   return chatBubble(chats[index]);
                 },
               ),
@@ -129,12 +181,45 @@ class _NimiScreenState extends State<NimiScreen> {
     );
   }
 
+  Widget _buildLoadingBubble() {
+    return Padding(
+      padding: const EdgeInsets.all(15.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 15.0),
+            decoration: BoxDecoration(
+              color: AppColors.lighterblue,
+              borderRadius: const BorderRadius.only(
+                topLeft: Radius.circular(15.0),
+                topRight: Radius.circular(15.0),
+                bottomLeft: Radius.circular(0.0),
+                bottomRight: Radius.circular(15.0),
+              ),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(
+                  width: 15, height: 15,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.background),
+                ),
+                const SizedBox(width: 10),
+                Text("Thinking...", style: TextStyle(color: AppColors.background, fontSize: 14.0, fontStyle: FontStyle.italic)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget chatBubble(Chats chat) {
     return Padding(
       padding: const EdgeInsets.all(15.0),
       child: Column(
-        crossAxisAlignment:
-            chat.isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+        crossAxisAlignment: chat.isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
         children: [
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 15.0),
@@ -143,28 +228,17 @@ class _NimiScreenState extends State<NimiScreen> {
               borderRadius: BorderRadius.only(
                 topLeft: const Radius.circular(15.0),
                 topRight: const Radius.circular(15.0),
-                bottomLeft: chat.isUser
-                    ? const Radius.circular(15.0)
-                    : const Radius.circular(0.0),
-                bottomRight: chat.isUser
-                    ? const Radius.circular(0.0)
-                    : const Radius.circular(15.0),
+                bottomLeft: chat.isUser ? const Radius.circular(15.0) : const Radius.circular(0.0),
+                bottomRight: chat.isUser ? const Radius.circular(0.0) : const Radius.circular(15.0),
               ),
             ),
             child: Text(
               chat.text,
-              style: TextStyle(
-                color: AppColors.background,
-                fontSize: 16.0,
-                height: 1.4,
-              ),
+              style: TextStyle(color: AppColors.background, fontSize: 16.0, height: 1.4),
             ),
           ),
           const SizedBox(height: 5),
-          Text(
-            chat.time,
-            style: TextStyle(color: AppColors.textDark, fontSize: 12),
-          )
+          Text(chat.time, style: TextStyle(color: AppColors.textDark, fontSize: 12))
         ],
       ),
     );
@@ -175,59 +249,37 @@ class _NimiScreenState extends State<NimiScreen> {
       padding: const EdgeInsets.symmetric(horizontal: 30.0, vertical: 10.0),
       child: Row(
         children: [
-          // Mic Button
           Container(
             decoration: BoxDecoration(
               border: Border.all(color: AppColors.lighterblue),
               borderRadius: BorderRadius.circular(10.0),
             ),
             child: IconButton(
-              onPressed: () {
-                // Future: Add speech-to-text logic here
-              },
+              onPressed: () {},
               icon: Icon(Icons.mic_none, color: AppColors.textDark),
             ),
           ),
           const SizedBox(width: 10.0),
-
-          // Text Field
           Expanded(
             child: TextField(
-              controller: _textController, // Connects to logic
+              controller: _textController,
               decoration: InputDecoration(
                 hintText: "Chat with Nimi",
-                hintStyle: TextStyle(
-                  color: AppColors.textDark,
-                ),
+                hintStyle: TextStyle(color: AppColors.textDark),
                 filled: true,
                 fillColor: AppColors.background,
-                contentPadding:
-                    const EdgeInsets.symmetric(horizontal: 16.0, vertical: 10.0),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10.0),
-                  borderSide: BorderSide(color: AppColors.lighterblue),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10.0),
-                  borderSide: BorderSide(color: AppColors.lighterblue),
-                ),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 10.0),
+                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10.0), borderSide: BorderSide(color: AppColors.lighterblue)),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10.0), borderSide: BorderSide(color: AppColors.lighterblue)),
               ),
             ),
           ),
           const SizedBox(width: 12.0),
-
-          // Send Button
           Container(
-            decoration: BoxDecoration(
-              color: AppColors.lighterblue,
-              borderRadius: BorderRadius.circular(10.0),
-            ),
+            decoration: BoxDecoration(color: AppColors.lighterblue, borderRadius: BorderRadius.circular(10.0)),
             child: IconButton(
-              onPressed: _handleSend, // Triggers the Python API call
-              icon: Icon(
-                Icons.send_rounded,
-                color: AppColors.background,
-              ),
+              onPressed: _handleSend,
+              icon: Icon(Icons.send_rounded, color: AppColors.background),
             ),
           ),
         ],
@@ -236,11 +288,9 @@ class _NimiScreenState extends State<NimiScreen> {
   }
 }
 
-// Chat Model Class
 class Chats {
   String text;
   String time;
   bool isUser;
-
   Chats({required this.text, required this.time, required this.isUser});
 }

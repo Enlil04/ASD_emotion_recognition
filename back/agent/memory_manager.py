@@ -1,5 +1,6 @@
 import sys
 import os
+import sqlite3
 
 # Get the path to the current directory (agent)
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -169,3 +170,36 @@ class MemoryManager:
         # Example output
         formatted = ", ".join([f"{emo}:{cnt}" for emo, cnt in top[:4]])
         return f"Top emotions last {days} days: {formatted}"
+    
+
+    # PASTE THIS METHOD INSIDE YOUR MemoryManager CLASS
+    def get_recent_interactions(self, limit=5):
+            try:
+                con = self._connect()
+                cursor = con.cursor()
+                
+                # --- CHANGE THIS SQL QUERY ---
+                # BAD (Old): SELECT user_input, ai_response FROM interactions...
+                # GOOD (New):
+                cursor.execute('''
+                    SELECT user_input, agent_response FROM interactions 
+                    WHERE user_id=? AND event_type='conversation'
+                    ORDER BY ts DESC LIMIT ?
+                ''', (self.user_id, limit))
+                # -----------------------------
+                
+                rows = cursor.fetchall()
+                con.close()
+                
+                history = []
+                for row in reversed(rows): 
+                    if row[0]: 
+                        history.append({"role": "user", "content": row[0]})
+                    if row[1]: 
+                        history.append({"role": "assistant", "content": row[1]})
+                    
+                return history
+                
+            except Exception as e:
+                print(f"⚠️ Memory Read Error: {e}")
+                return []
