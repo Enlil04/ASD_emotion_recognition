@@ -9,6 +9,11 @@ tqdm>=4.65.0
 pandas
 ollama
 pillow
+langchain
+fastapi
+uvicorn
+langchain-community
+langchain-core
 
 # pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 # python analytics/vision_models/train.py

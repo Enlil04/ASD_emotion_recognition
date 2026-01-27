@@ -1,22 +1,160 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:camera/camera.dart';
 import '../../theme/app_colors.dart';
+import '../../services/api_service.dart';
 
-class CameraScreen extends StatelessWidget {
+class CameraScreen extends StatefulWidget {
   const CameraScreen({super.key});
+
+  @override
+  State<CameraScreen> createState() => _CameraScreenState();
+}
+
+class _CameraScreenState extends State<CameraScreen> {
+  CameraController? _controller;
+  bool _isCameraInitialized = false;
+  
+  // STATE VARIABLES
+  bool _isRecording = false; 
+  bool _isAnalyzing = false; 
+  int _timeLeft = 10;         // Set to 10 seconds
+  Timer? _timer;
+
+  List<Map<String, dynamic>> _recentSessions = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeCamera();
+  }
+
+  Future<void> _initializeCamera() async {
+    try {
+      final cameras = await availableCameras();
+      
+      if (cameras.isEmpty) {
+        print("❌ No cameras found on device!");
+        return;
+      }
+
+      // SAFELY FIND A CAMERA:
+      // Try to find the front camera, but if it doesn't exist, just use the first one (Back).
+      CameraDescription camera = cameras.first;
+      for (var cam in cameras) {
+        if (cam.lensDirection == CameraLensDirection.front) {
+          camera = cam;
+          break;
+        }
+      }
+
+      _controller = CameraController(
+        camera, 
+        ResolutionPreset.medium, 
+        enableAudio: false,
+      );
+
+      await _controller!.initialize();
+      if (mounted) setState(() => _isCameraInitialized = true);
+      
+    } catch (e) {
+      print("❌ Camera Initialization Error: $e");
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller?.dispose();
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  // --- 1. START THE 10-SECOND SESSION ---
+  void _startSession() async {
+    if (!_isCameraInitialized || _isRecording || _isAnalyzing) return;
+
+    try {
+      await _controller!.startVideoRecording();
+      
+      setState(() {
+        _isRecording = true;
+        _timeLeft = 10; // Ensure starts at 10
+      });
+
+      _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
+        if (_timeLeft > 0) {
+          setState(() => _timeLeft--);
+        } else {
+          _stopSession(); 
+        }
+      });
+
+    } catch (e) {
+      print("Error starting: $e");
+    }
+  }
+
+  // --- 2. STOP & SEND TO PYTHON ---
+  void _stopSession() async {
+    _timer?.cancel();
+    if (!_isRecording) return;
+
+    try {
+      final XFile videoFile = await _controller!.stopVideoRecording();
+      
+      setState(() {
+        _isRecording = false;
+        _isAnalyzing = true; 
+      });
+
+      // API Call
+      Map<String, dynamic> result = await ApiService.analyzeSession(videoFile.path);
+      
+      String emotion = result['dominant_emotion'] ?? "Unknown";
+      
+      setState(() {
+        _isAnalyzing = false;
+        _timeLeft = 10; // Reset for next time
+        
+        _recentSessions.insert(0, {
+          "label": emotion,
+          "confidence": result['confidence'] ?? 0,
+          "time": _getCurrentTime(),
+          "color": _getColorForEmotion(emotion),
+        });
+      });
+
+    } catch (e) {
+      print("Error stopping: $e");
+      setState(() {
+        _isRecording = false;
+        _isAnalyzing = false;
+      });
+    }
+  }
+
+  String _getCurrentTime() {
+    final now = DateTime.now();
+    return "${now.hour}:${now.minute.toString().padLeft(2, '0')}";
+  }
+
+  Color _getColorForEmotion(String emotion) {
+    switch (emotion.toLowerCase()) {
+      case 'happy': return Colors.green;
+      case 'sad': return Colors.blueGrey;
+      case 'angry': return Colors.red;
+      case 'surprised': return Colors.orange;
+      case 'neutral': return Colors.blue;
+      default: return Colors.purple;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
-        title: const Text(
-          'Camera',
-          style: TextStyle(
-            color: AppColors.titletext,
-            fontWeight: FontWeight.w500,
-            fontSize: 20,
-          ),
-        ),
+        title: const Text('Mood Session', style: TextStyle(color: AppColors.titletext, fontWeight: FontWeight.w500)),
         backgroundColor: AppColors.background,
         elevation: 0,
         automaticallyImplyLeading: false,
@@ -24,7 +162,6 @@ class CameraScreen extends StatelessWidget {
       body: SafeArea(
         child: Column(
           children: [
-            // --- TOP SCROLLABLE SECTION ---
             Expanded(
               child: SingleChildScrollView(
                 child: Padding(
@@ -34,172 +171,145 @@ class CameraScreen extends StatelessWidget {
                     children: [
                       const SizedBox(height: 20),
 
-                      // 1. CAMERA SQUARE
+                      // --- LIVE CAMERA FEED ---
                       AspectRatio(
                         aspectRatio: 1.0,
-                        child: Container(
-                          decoration: BoxDecoration(
-                            color: AppColors.blue,
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(color: AppColors.lighterblue, width: 2),
-                          ),
-                          child: const Center(
-                            child: Icon(Icons.camera_alt, size: 50, color: AppColors.lighterblue),
-                          ),
+                        child: Stack(
+                          alignment: Alignment.center,
+                          children: [
+                            Container(
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(
+                                  color: _isRecording ? Colors.redAccent : AppColors.lighterblue, 
+                                  width: 4
+                                ),
+                              ),
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(16),
+                                child: _isCameraInitialized
+                                    ? CameraPreview(_controller!)
+                                    : const Center(child: CircularProgressIndicator()),
+                              ),
+                            ),
+                            
+                            if (_isRecording)
+                              Positioned(
+                                bottom: 20,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                                  decoration: BoxDecoration(
+                                    color: Colors.redAccent.withOpacity(0.8),
+                                    borderRadius: BorderRadius.circular(20),
+                                  ),
+                                  child: Text(
+                                    "Recording: $_timeLeft s",
+                                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                                  ),
+                                ),
+                              ),
+
+                            if (_isAnalyzing)
+                              Container(
+                                decoration: BoxDecoration(
+                                  color: Colors.black.withOpacity(0.7),
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                                child: const Center(
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      CircularProgressIndicator(color: Colors.white),
+                                      SizedBox(height: 10),
+                                      Text("Analyzing Mood...", style: TextStyle(color: Colors.white)),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                          ],
                         ),
                       ),
 
                       const SizedBox(height: 25),
-
-                      // 2. TITLE
-                      const Text(
-                        "Recent Detections",
-                        style: TextStyle(
-                          color: AppColors.lighterblue,
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-
+                      const Text("Session History", style: TextStyle(color: AppColors.lighterblue, fontSize: 16, fontWeight: FontWeight.w600)),
                       const SizedBox(height: 15),
 
-                      // 3. VERTICAL LIST OF DETECTIONS
-                      // We use a Column here so it scrolls with the rest of the page
-                      Column(
-                        children: [
-                          _buildDetectionRow(
-                            label: "Happy",
-                            date: "Today, 10:42 AM",
-                            color: Colors.green,
-                          ),
-                          _buildDetectionRow(
-                            label: "Neutral",
-                            date: "Today, 9:15 AM",
-                            color: Colors.blue,
-                          ),
-                          _buildDetectionRow(
-                            label: "Surprised",
-                            date: "Yesterday, 8:30 PM",
-                            color: Colors.orange,
-                          ),
-                          _buildDetectionRow(
-                            label: "Calm",
-                            date: "Yesterday, 6:00 PM",
-                            color: Colors.purple,
-                          ),
-                        ],
-                      ),
-                      
-                      const SizedBox(height: 20),
+                      if (_recentSessions.isEmpty)
+                        const Padding(padding: EdgeInsets.all(20), child: Text("Start a session to track your mood."))
+                      else
+                        Column(
+                          children: _recentSessions.map((d) => _buildSessionRow(d)).toList(),
+                        ),
                     ],
                   ),
                 ),
               ),
             ),
 
-            // --- BOTTOM FIXED BUTTONS ---
+            // --- START BUTTON ---
             Padding(
               padding: const EdgeInsets.only(top: 10, bottom: 30),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  IconButton(
-                    icon: const Icon(Icons.photo_library, size: 30, color: AppColors.lighterblue),
-                    onPressed: () {},
+              child: GestureDetector(
+                onTap: _isRecording ? null : _startSession, 
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 300),
+                  height: 80,
+                  width: 80,
+                  decoration: BoxDecoration(
+                    color: _isRecording ? Colors.grey[300] : Colors.redAccent, 
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      if (!_isRecording)
+                        BoxShadow(color: Colors.redAccent.withOpacity(0.4), blurRadius: 15, offset: const Offset(0, 5))
+                    ],
                   ),
-                  const SizedBox(width: 40),
-                  GestureDetector(
-                    onTap: () => print("Snap!"),
-                    child: Container(
-                      height: 80,
-                      width: 80,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        border: Border.all(
-                          color: AppColors.textDark.withOpacity(0.6),
-                          width: 4,
-                        ),
-                        color: Colors.transparent,
-                      ),
-                      padding: const EdgeInsets.all(5),
-                      child: Container(
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: AppColors.textDark.withOpacity(0.6),
-                        ),
-                      ),
+                  child: Center(
+                    child: Icon(
+                      _isRecording ? Icons.hourglass_bottom : Icons.videocam,
+                      color: Colors.white,
+                      size: 35,
                     ),
                   ),
-                  const SizedBox(width: 40),
-                  IconButton(
-                    icon: const Icon(Icons.flip_camera_ios, size: 30, color: AppColors.lighterblue),
-                    onPressed: () {},
-                  ),
-                ],
+                ),
               ),
             ),
+            if (!_isRecording && !_isAnalyzing)
+              const Padding(
+                padding: EdgeInsets.only(bottom: 20),
+                child: Text("Tap to start 10s Session", style: TextStyle(color: AppColors.textDark)), // Updated text
+              )
           ],
         ),
       ),
     );
   }
 
-  // --- NEW ROW WIDGET ---
-  Widget _buildDetectionRow({
-    required String label,
-    required String date,
-    required Color color,
-  }) {
+  Widget _buildSessionRow(Map<String, dynamic> data) {
     return Container(
-      margin: const EdgeInsets.only(bottom: 12), // Spacing between rows
+      margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: AppColors.blue.withOpacity(0.3)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.03),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
+        boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 5, offset: const Offset(0, 2))],
       ),
       child: Row(
         children: [
-          // Icon Box
           Container(
             padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: color.withOpacity(0.1),
-              shape: BoxShape.circle,
-            ),
-            child: Icon(Icons.emoji_emotions, color: color, size: 24),
+            decoration: BoxDecoration(color: (data['color'] as Color).withOpacity(0.1), shape: BoxShape.circle),
+            child: Icon(Icons.psychology, color: data['color'], size: 24),
           ),
-          
           const SizedBox(width: 15),
-          
-          // Text Details
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  label,
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                    color: AppColors.textDark,
-                  ),
+                  "${data['label']} (${data['confidence'].toInt()}%)", 
+                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: AppColors.textDark)
                 ),
-                const SizedBox(height: 4),
-                Text(
-                  date,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: AppColors.textDark.withOpacity(0.6),
-                  ),
-                ),
+                Text("Session at ${data['time']}", style: TextStyle(fontSize: 12, color: AppColors.textDark.withOpacity(0.6))),
               ],
             ),
           ),
