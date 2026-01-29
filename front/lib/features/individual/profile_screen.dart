@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../theme/app_colors.dart';
+import 'dashboard.dart';
 
 class ProfileScreen extends StatelessWidget {
   // We keep the GlobalKey here because this specific screen has a specific Drawer
@@ -132,7 +133,12 @@ class ProfileScreen extends StatelessWidget {
             ListTile(
               leading: const Icon(Icons.dashboard),
               title: const Text('Dashboard'),
-              onTap: () {},
+              onTap: () {
+                Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (context) => const DashboardInsightsScreen()),
+                  );
+              },  
             ),
             ListTile(
               leading: const Icon(Icons.help),

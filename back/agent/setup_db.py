@@ -1,121 +1,123 @@
-"""
-DATABASE SETUP UTILITY
-----------------------
-A standalone script to initialize the SQLite database. It creates the required 
-tables (users, emotion_daily, interactions) if they do not exist. 
-Run this once before starting the main application.
-"""
-
-import os
 import sqlite3
+import os
 import time
+from datetime import datetime, timedelta
+import random
 
-# This ensures the database goes into back/agent/data/memory.db
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data")
+# ==============================
+# DB PATH (same as server)
+# ==============================
+DATA_DIR = "data"
+os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "memory.db")
 
-def init_db():
-    # Automatically create the 'data' folder if it is missing
-    if not os.path.exists(DATA_DIR):
-        os.makedirs(DATA_DIR)
-        print(f"📁 Created directory: {DATA_DIR}")
+EMOTIONS = ["Happy", "Sad", "Neutral", "Anger", "Fear", "Surprise", "Disgust"]
 
-    print(f"Initializing database at: {DB_PATH}")
-    # ... rest of your init_db code ...
-    
-    con = sqlite3.connect(DB_PATH)
-    try:
-        # 1. Enable WAL mode for better concurrency (writing while reading)
-        con.execute("PRAGMA journal_mode=WAL;")
-        con.execute("PRAGMA synchronous=NORMAL;")
-        
-        # 2. Table: Users (Preferences & Profile)
-        print("Creating table: users...")
-        con.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id TEXT PRIMARY KEY,
-            preferences_json TEXT NOT NULL DEFAULT '{}',
-            created_at REAL NOT NULL,
-            updated_at REAL NOT NULL
-        );
-        """)
+def setup_tables(con):
+    cur = con.cursor()
 
-        # 3. Table: Emotion Daily (Long-term aggregates)
-        print("Creating table: emotion_daily...")
-        con.execute("""
-        CREATE TABLE IF NOT EXISTS emotion_daily (
-            user_id TEXT NOT NULL,
-            day TEXT NOT NULL,            -- YYYY-MM-DD
-            emotion TEXT NOT NULL,
-            count INTEGER NOT NULL,
-            updated_at REAL NOT NULL,
-            PRIMARY KEY (user_id, day, emotion),
-            FOREIGN KEY (user_id) REFERENCES users(user_id)
-        );
-        """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        user_id TEXT PRIMARY KEY,
+        preferences_json TEXT,
+        created_at REAL,
+        updated_at REAL
+    )
+    """)
 
-        # 4. Table: Interactions (Chat logs & Event history)
-        print("Creating table: interactions...")
-        con.execute("""
-        CREATE TABLE IF NOT EXISTS interactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            ts REAL NOT NULL,
-            readable_time TEXT NOT NULL,
-            event_type TEXT NOT NULL,      -- 'conversation' or 'observation'
-            user_input TEXT,
-            agent_response TEXT,
-            detected_emotion TEXT,
-            confidence REAL
-        );
-        """)
-        
-        # 5. Create Indices for speed
-        con.execute("CREATE INDEX IF NOT EXISTS idx_interactions_user_ts ON interactions(user_id, ts);")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS emotion_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
+        emotion TEXT,
+        confidence REAL,
+        timestamp REAL
+    )
+    """)
 
-        con.commit()
-        print("✅ Database initialized successfully.")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS emotion_daily (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
+        day TEXT,
+        emotion TEXT,
+        count INTEGER,
+        updated_at REAL,
+        UNIQUE(user_id, day, emotion)
+    )
+    """)
 
-    except Exception as e:
-        print(f"❌ Error initializing database: {e}")
-    finally:
-        con.close()
+    con.commit()
 
-def seed_dummy_data():
-    """Optional: Adds some fake data to test the 'Long-term trends' logic immediately."""
+
+def seed_dummy_data(con):
     user_id = "user_001"
-    print(f"Seeding dummy data for {user_id}...")
-    
-    con = sqlite3.connect(DB_PATH)
     now = time.time()
-    day = time.strftime("%Y-%m-%d", time.localtime())
-    
-    try:
-        # Ensure user exists
-        con.execute("""
-        INSERT INTO users (user_id, preferences_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(user_id) DO NOTHING;
-        """, (user_id, '{"name": "Alex", "triggers": ["loud noises"]}', now, now))
-        
-        # Add some fake emotion counts for "today"
-        # Happy: 15, Sad: 5, Neutral: 20
-        emotions = [("Happy", 15), ("Sad", 5), ("Neutral", 20)]
-        for emo, count in emotions:
-            con.execute("""
+
+    cur = con.cursor()
+
+    # Ensure user exists
+    cur.execute("""
+    INSERT INTO users (user_id, preferences_json, created_at, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET updated_at=excluded.updated_at;
+    """, (user_id, '{"name":"Test User"}', now, now))
+
+    # Clear old data
+    cur.execute("DELETE FROM emotion_daily WHERE user_id = ?", (user_id,))
+    cur.execute("DELETE FROM emotion_logs WHERE user_id = ?", (user_id,))
+
+    today = datetime.now().date()
+
+    for i in range(7):
+        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+
+        # 🔴 SAD-HEAVY DISTRIBUTION
+        daily_counts = {
+            "Sad": random.randint(15, 30),
+            "Neutral": random.randint(5, 12),
+            "Happy": random.randint(2, 8),
+            "Anger": random.randint(1, 6),
+            "Fear": random.randint(1, 6),
+            "Surprise": random.randint(0, 3),
+            "Disgust": random.randint(0, 3),
+        }
+
+        for emo in EMOTIONS:
+            cnt = int(daily_counts.get(emo, 0))
+
+            cur.execute("""
             INSERT INTO emotion_daily (user_id, day, emotion, count, updated_at)
             VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(user_id, day, emotion) DO UPDATE SET count = count + excluded.count;
-            """, (user_id, day, emo, count, now))
-            
-        con.commit()
-        print("✅ Dummy data seeded.")
-    finally:
-        con.close()
+            ON CONFLICT(user_id, day, emotion)
+            DO UPDATE SET count=excluded.count, updated_at=excluded.updated_at;
+            """, (user_id, d, emo, cnt, now))
+
+            for _ in range(cnt):
+                cur.execute("""
+                INSERT INTO emotion_logs (user_id, emotion, confidence, timestamp)
+                VALUES (?, ?, ?, ?)
+                """, (
+                    user_id,
+                    emo,
+                    round(random.uniform(0.6, 0.99), 2),
+                    now
+                ))
+
+    con.commit()
+    print("✅ Seeded last 7 days with SAD-dominant emotion data.")
+
+
+def main():
+    print(f"Initializing database at: {os.path.abspath(DB_PATH)}")
+    con = sqlite3.connect(DB_PATH)
+
+    setup_tables(con)
+    seed_dummy_data(con)
+
+    con.close()
+    print("✅ Database ready.")
+
 
 if __name__ == "__main__":
-    init_db()
-    
-    # Uncomment the line below if you want to start with some fake history
-    # seed_dummy_data()
+    main()
