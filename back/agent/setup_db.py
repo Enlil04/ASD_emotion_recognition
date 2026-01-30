@@ -1,37 +1,43 @@
+from __future__ import annotations
+
 import os
+import sys
+import time
+import random
+import sqlite3
+from datetime import datetime, timedelta
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
 
-# ==============================
-# PATHS
-# ==============================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# =========================================================
+# PATHS (single source of truth)
+# =========================================================
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# If this file is in /services, DB should be in ../data/memory.db
-# If this file is already at root/agent, DB should be in ./data/memory.db
-if os.path.basename(BASE_DIR) == "services":
-    AGENT_DIR = os.path.dirname(BASE_DIR)
+# If this file is inside /services, go up one level to project root.
+if os.path.basename(CURRENT_DIR) == "services":
+    PROJECT_DIR = os.path.dirname(CURRENT_DIR)
 else:
-    AGENT_DIR = BASE_DIR
+    PROJECT_DIR = CURRENT_DIR
 
-DATA_DIR = os.path.join(AGENT_DIR, "data")
+DATA_DIR = os.path.join(PROJECT_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 DB_PATH = os.path.join(DATA_DIR, "memory.db")
 SQLALCHEMY_DATABASE_URL = f"sqlite:///{DB_PATH}"
 
-print(f"📂 DATABASE SET TO: {DB_PATH}")
-
-# ==============================
-# SQLALCHEMY
-# ==============================
+# =========================================================
+# SQLAlchemy wiring
+# =========================================================
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
     connect_args={"check_same_thread": False},
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
 
 def get_db():
     db = SessionLocal()
@@ -41,6 +47,229 @@ def get_db():
         db.close()
 
 
+# =========================================================
+# Seed helpers (optional)
+# =========================================================
+EMOTIONS = ["Happy", "Sad", "Neutral", "Anger", "Fear", "Surprise", "Disgust"]
+
+NAMES = ["Maryam", "Ali", "Zainab", "Hussein", "Noor", "Sara", "Omar", "Hala", "Yasmin", "Mustafa", "Rana", "Ahmed"]
+ROLES = ["student", "parent", "teacher", "therapist", "mentor", "member"]
+
+POST_TEMPLATES = [
+    "Had a tough day today. Any tips to calm down?",
+    "My routine worked well today — feeling proud.",
+    "Does anyone know good breathing exercises?",
+    "I got overwhelmed in a noisy place. What helps you?",
+    "Small win: I completed my tasks and took breaks.",
+    "Any advice for staying consistent with habits?",
+]
+
+COMMENT_TEMPLATES = [
+    "I relate to this. Short walks help me.",
+    "Try box breathing for 2 minutes — it’s simple.",
+    "You’re not alone. One step at a time.",
+    "For noise, earplugs can really help.",
+    "Proud of you. Keep the routine gentle and consistent.",
+    "Maybe write a short checklist and take breaks.",
+]
+
+
+def _random_username(name: str, i: int) -> str:
+    suffix = random.randint(10, 999)
+    return f"{name.lower()}{i}{suffix}"
+
+
+def _seed_if_empty_sqlite(db_path: str):
+    """Seeds data only if tables are empty. Uses sqlite3 directly to stay simple/robust."""
+    con = sqlite3.connect(db_path)
+    cur = con.cursor()
+    now = time.time()
+
+    # Users
+    cur.execute("SELECT COUNT(*) FROM users")
+    user_count = cur.fetchone()[0]
+
+    if user_count == 0:
+        # primary user
+        cur.execute(
+            """
+            INSERT INTO users (
+                user_id, name, role, age, description, photo, streak, connections, username,
+                preferences_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "user_001",
+                "Test User",
+                "member",
+                21,
+                "Starter account for testing.",
+                "",
+                random.randint(1, 14),
+                random.randint(10, 200),
+                "user_001",
+                '{"name":"Test User"}',
+                now,
+                now,
+            ),
+        )
+
+        # additional users
+        for i in range(2, 9):
+            name = random.choice(NAMES)
+            user_id = f"user_{i:03d}"
+            cur.execute(
+                """
+                INSERT INTO users (
+                    user_id, name, role, age, description, photo, streak, connections, username,
+                    preferences_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    name,
+                    random.choice(ROLES),
+                    random.randint(10, 40),
+                    "Community member.",
+                    "",
+                    random.randint(0, 30),
+                    random.randint(0, 500),
+                    _random_username(name, i),
+                    f'{{"name":"{name}"}}',
+                    now,
+                    now,
+                ),
+            )
+
+    # Emotion seed for user_001 if missing
+    cur.execute("SELECT COUNT(*) FROM emotion_daily WHERE user_id = ?", ("user_001",))
+    daily_count = cur.fetchone()[0]
+
+    if daily_count == 0:
+        today = datetime.now().date()
+        for i in range(7):
+            d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+            daily_counts = {
+                "Sad": random.randint(15, 30),
+                "Neutral": random.randint(5, 12),
+                "Happy": random.randint(2, 8),
+                "Anger": random.randint(1, 6),
+                "Fear": random.randint(1, 6),
+                "Surprise": random.randint(0, 3),
+                "Disgust": random.randint(0, 3),
+            }
+            for emo in EMOTIONS:
+                cnt = int(daily_counts.get(emo, 0))
+                cur.execute(
+                    """
+                    INSERT INTO emotion_daily (user_id, day, emotion, count, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(user_id, day, emotion)
+                    DO UPDATE SET count=excluded.count, updated_at=excluded.updated_at;
+                    """,
+                    ("user_001", d, emo, cnt, now),
+                )
+                for _ in range(min(cnt, 12)):
+                    cur.execute(
+                        """
+                        INSERT INTO emotion_logs (user_id, emotion, confidence, timestamp)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            "user_001",
+                            emo,
+                            round(random.uniform(0.6, 0.99), 2),
+                            now - random.randint(0, 60 * 60 * 24 * 7),
+                        ),
+                    )
+
+    # Community seed only if no posts
+    cur.execute("SELECT COUNT(*) FROM community_posts")
+    post_count = cur.fetchone()[0]
+    if post_count == 0:
+        cur.execute("SELECT user_id FROM users")
+        user_ids = [r[0] for r in cur.fetchall()] or ["user_001"]
+
+        post_ids = []
+        for _ in range(12):
+            uid = random.choice(user_ids)
+            content = random.choice(POST_TEMPLATES)
+            created = now - random.randint(0, 60 * 60 * 24 * 14)
+            cur.execute(
+                """
+                INSERT INTO community_posts (user_id, content, likes, comments, date_created)
+                VALUES (?, ?, 0, 0, ?)
+                """,
+                (uid, content, created),
+            )
+            post_ids.append(cur.lastrowid)
+
+        for post_id in post_ids:
+            commenters = random.sample(user_ids, k=min(len(user_ids), max(1, random.randint(1, 4))))
+            n_comments = random.randint(0, 6)
+            for _ in range(n_comments):
+                uid = random.choice(commenters)
+                created = now - random.randint(0, 60 * 60 * 24 * 14)
+                cur.execute(
+                    """
+                    INSERT INTO comments (post_id, user_id, content, date_created)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (post_id, uid, random.choice(COMMENT_TEMPLATES), created),
+                )
+
+            n_likes = random.randint(0, 8)
+            likers = random.sample(user_ids, k=min(len(user_ids), n_likes))
+            for uid in likers:
+                created = now - random.randint(0, 60 * 60 * 24 * 14)
+                cur.execute(
+                    """
+                    INSERT OR IGNORE INTO post_likes (post_id, user_id, date_created)
+                    VALUES (?, ?, ?)
+                    """,
+                    (post_id, uid, created),
+                )
+
+            like_count = cur.execute("SELECT COUNT(*) FROM post_likes WHERE post_id = ?", (post_id,)).fetchone()[0]
+            comment_count = cur.execute("SELECT COUNT(*) FROM comments WHERE post_id = ?", (post_id,)).fetchone()[0]
+            cur.execute(
+                "UPDATE community_posts SET likes = ?, comments = ? WHERE id = ?",
+                (like_count, comment_count, post_id),
+            )
+
+    con.commit()
+    con.close()
+
+
+# =========================================================
+# Public init: create tables + optional seed
+# =========================================================
+def init_db(seed: bool = True):
+    """Create tables (SQLAlchemy) and optionally seed starter rows."""
+    # Ensure models are imported so Base knows them
+    try:
+        import services.models  # noqa: F401
+    except Exception:
+        try:
+            from services import models  # noqa: F401
+        except Exception:
+            # If models aren't importable, table creation will be incomplete.
+            # But we still try to create whatever is registered on Base.
+            pass
+
+    Base.metadata.create_all(bind=engine)
+
+    if seed:
+        _seed_if_empty_sqlite(DB_PATH)
+
+
+def main():
+    init_db(seed=True)
+    print(f"✅ Database ready at: {DB_PATH}")
+
+
+if __name__ == "__main__":
+    main()
 
 
 # import os
