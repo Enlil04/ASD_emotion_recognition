@@ -35,17 +35,17 @@ LABELS = ['Anger', 'Disgust', 'Fear', 'Happy', 'Neutral', 'Sad', 'Surprise']
 
 # --- CLASS WEIGHTS ---
 CLASS_MULTIPLIERS = {
-    "Anger": 1.0,
-    "Disgust": 0.1,
+    "Anger": 0.25,
+    "Disgust": 0.098,
     "Fear": 1.0,
     "Happy": 12.0,      # boosted
-    "Neutral": 11.0,    # reduced from 15
-    "Sad": 0.094,
+    "Neutral": 10.9,    # reduced from 15
+    "Sad": 0.097,
     "Surprise": 0.55
 }
 
 BASE_THRESHOLDS = {
-    "Anger": 0.15, "Disgust": 0.40, "Fear": 0.15,
+    "Anger": 0.05, "Disgust": 0.40, "Fear": 0.15,
     "Happy": 0.05, "Neutral": 0.15, "Sad": 0.25, "Surprise": 0.55
 }
 
@@ -129,7 +129,7 @@ class EmotionDetector:
     # =========================================================
     # PREDICTION
     # =========================================================
-    def predict(self, frame):
+    def predict(self, frame, smooth=True):
         h, w, _ = frame.shape
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         res = self.face_mesh.process(rgb)
@@ -153,28 +153,38 @@ class EmotionDetector:
         face = frame[y1:y2, x1:x2]
         if face.size == 0:
             return None, 0.0, None, None
+        
 
-        # --- GEOMETRY ---
-        mouth_open = self.mouth_open_ratio(lm, w, h)
-        smile_width = self.smile_width_ratio(lm, w, h)
-
-        # --- PREPROCESS ---
+        # --- lighting analysis ---
         gray = cv2.cvtColor(face, cv2.COLOR_BGR2GRAY)
-        gray = self.clahe.apply(gray)
-        face_3c = cv2.merge([gray, gray, gray])
+        average_brightness = np.mean(gray)
+
+        dynamic_clahe_clip = cv2.createCLAHE(clipLimit=1.2 if average_brightness > 160 else 2.0, tileGridSize=(8,8))
+        gray_enhanced = dynamic_clahe_clip.apply(gray)
+        face_3c = cv2.merge([gray_enhanced, gray_enhanced, gray_enhanced])
 
         img = Image.fromarray(face_3c)
         img_t = self.transform(img).unsqueeze(0).to(self.device)
         if self.use_fp16:
             img_t = img_t.half()
 
+
+        # --- GEOMETRY ---
+        mouth_open = self.mouth_open_ratio(lm, w, h)
+        smile_width = self.smile_width_ratio(lm, w, h)
+
+
         # --- INFERENCE ---
         with torch.no_grad():
             logits = self.model(img_t)
             probs = torch.softmax(logits, dim=1)[0].cpu().numpy()
 
-        self.prob_buffer.append(probs)
-        avg = np.mean(self.prob_buffer, axis=0)
+        # --- 
+        if smooth:
+            self.prob_buffer.append(probs)
+            avg = np.mean(self.prob_buffer, axis=0) 
+        else:
+            avg = probs
 
         weighted = avg.copy()
         for i, label in enumerate(LABELS):
@@ -182,6 +192,12 @@ class EmotionDetector:
 
         temp_idx = np.argmax(weighted)
         temp_emotion = LABELS[temp_idx]
+
+
+        if average_brightness > 150:
+
+            weighted[LABELS.index("Anger")] *= 0.07
+            weighted[LABELS.index("Neutral")] *= 2.5
 
         # =========================================================
         # SMART OVERRIDES

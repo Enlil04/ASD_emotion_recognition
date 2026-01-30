@@ -937,216 +937,16 @@ class _CommentTile extends StatelessWidget {
 // import '../../../theme/app_colors.dart';
 // import 'chat_screen.dart';
 // import 'package:flutter_application_1/user_role.dart';
-// import '../../../services/api_service.dart';
 
-// class CommunityScreen extends StatefulWidget {
+// class CommunityScreen extends StatelessWidget {
 //   const CommunityScreen({super.key, required this.userRole});
 //   final UserRole userRole;
-
-//   @override
-//   State<CommunityScreen> createState() => _CommunityScreenState();
-// }
-
-// class _CommunityScreenState extends State<CommunityScreen> {
-//   // For now you are using a hardcoded user in other places (chat/dashboard).
-//   // Keep it consistent until you add auth/login.
-//   static const String _currentUserId = "user_001";
-
-//   final TextEditingController _searchCtrl = TextEditingController();
-
-//   bool _loading = true;
-//   String? _error;
-//   List<Map<String, dynamic>> _allPosts = [];
-//   List<Map<String, dynamic>> _filteredPosts = [];
-
-//   @override
-//   void initState() {
-//     super.initState();
-//     _loadFeed();
-//     _searchCtrl.addListener(_applySearch);
-//   }
-
-//   @override
-//   void dispose() {
-//     _searchCtrl.removeListener(_applySearch);
-//     _searchCtrl.dispose();
-//     super.dispose();
-//   }
-
-//   Future<void> _loadFeed() async {
-//     setState(() {
-//       _loading = true;
-//       _error = null;
-//     });
-
-//     try {
-//       final res = await ApiService.fetchCommunityPosts(
-//         userId: _currentUserId,
-//         limit: 50,
-//         offset: 0,
-//       );
-
-//       final items = (res["items"] as List<dynamic>? ?? [])
-//           .whereType<Map<String, dynamic>>()
-//           .toList();
-
-//       setState(() {
-//         _allPosts = items;
-//         _filteredPosts = items;
-//         _loading = false;
-//       });
-
-//       // Apply search if user already typed something
-//       _applySearch();
-//     } catch (e) {
-//       setState(() {
-//         _error = e.toString();
-//         _loading = false;
-//         _allPosts = [];
-//         _filteredPosts = [];
-//       });
-//     }
-//   }
-
-//   void _applySearch() {
-//     final q = _searchCtrl.text.trim().toLowerCase();
-//     if (q.isEmpty) {
-//       setState(() => _filteredPosts = _allPosts);
-//       return;
-//     }
-
-//     setState(() {
-//       _filteredPosts = _allPosts.where((p) {
-//         final content = (p["content"] ?? "").toString().toLowerCase();
-//         final author = ((p["author"]?["name"]) ?? (p["author"]?["username"]) ?? "")
-//             .toString()
-//             .toLowerCase();
-//         return content.contains(q) || author.contains(q);
-//       }).toList();
-//     });
-//   }
-
-//   String _relativeTime(num? unixSeconds) {
-//     if (unixSeconds == null) return "";
-//     final dt = DateTime.fromMillisecondsSinceEpoch((unixSeconds * 1000).toInt());
-//     final diff = DateTime.now().difference(dt);
-
-//     if (diff.inSeconds < 60) return "just now";
-//     if (diff.inMinutes < 60) return "${diff.inMinutes} min ago";
-//     if (diff.inHours < 24) return "${diff.inHours} hours ago";
-//     if (diff.inDays < 7) return "${diff.inDays} days ago";
-//     final weeks = (diff.inDays / 7).floor();
-//     return "$weeks weeks ago";
-//   }
-
-//   Future<void> _openCreatePostSheet() async {
-//     final controller = TextEditingController();
-//     final created = await showModalBottomSheet<bool>(
-//       context: context,
-//       isScrollControlled: true,
-//       backgroundColor: AppColors.background,
-//       shape: const RoundedRectangleBorder(
-//         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-//       ),
-//       builder: (ctx) {
-//         final bottomInset = MediaQuery.of(ctx).viewInsets.bottom;
-//         return Padding(
-//           padding: EdgeInsets.only(
-//             left: 16,
-//             right: 16,
-//             top: 14,
-//             bottom: bottomInset + 16,
-//           ),
-//           child: Column(
-//             mainAxisSize: MainAxisSize.min,
-//             crossAxisAlignment: CrossAxisAlignment.start,
-//             children: [
-//               const Text(
-//                 "New post",
-//                 style: TextStyle(
-//                   color: AppColors.titletext,
-//                   fontSize: 18,
-//                   fontWeight: FontWeight.w600,
-//                 ),
-//               ),
-//               const SizedBox(height: 12),
-//               TextField(
-//                 controller: controller,
-//                 minLines: 3,
-//                 maxLines: 8,
-//                 decoration: InputDecoration(
-//                   hintText: "Share something…",
-//                   hintStyle: TextStyle(color: AppColors.textDark.withOpacity(0.5)),
-//                   filled: true,
-//                   fillColor: AppColors.blue.withOpacity(0.18),
-//                   border: OutlineInputBorder(
-//                     borderRadius: BorderRadius.circular(14),
-//                     borderSide: BorderSide.none,
-//                   ),
-//                 ),
-//               ),
-//               const SizedBox(height: 12),
-//               Row(
-//                 children: [
-//                   Expanded(
-//                     child: OutlinedButton(
-//                       onPressed: () => Navigator.pop(ctx, false),
-//                       style: OutlinedButton.styleFrom(
-//                         foregroundColor: AppColors.lighterblue,
-//                         side: BorderSide(color: AppColors.lighterblue.withOpacity(0.5)),
-//                         shape: RoundedRectangleBorder(
-//                           borderRadius: BorderRadius.circular(14),
-//                         ),
-//                         padding: const EdgeInsets.symmetric(vertical: 12),
-//                       ),
-//                       child: const Text("Cancel"),
-//                     ),
-//                   ),
-//                   const SizedBox(width: 12),
-//                   Expanded(
-//                     child: ElevatedButton(
-//                       onPressed: () async {
-//                         final content = controller.text.trim();
-//                         if (content.isEmpty) return;
-
-//                         try {
-//                           await ApiService.createCommunityPost(
-//                             userId: _currentUserId,
-//                             content: content,
-//                           );
-//                           if (mounted) Navigator.pop(ctx, true);
-//                         } catch (_) {
-//                           // keep sheet open; screen will show error after refresh if needed
-//                         }
-//                       },
-//                       style: ElevatedButton.styleFrom(
-//                         backgroundColor: AppColors.lighterblue,
-//                         foregroundColor: AppColors.background,
-//                         shape: RoundedRectangleBorder(
-//                           borderRadius: BorderRadius.circular(14),
-//                         ),
-//                         padding: const EdgeInsets.symmetric(vertical: 12),
-//                       ),
-//                       child: const Text("Post"),
-//                     ),
-//                   ),
-//                 ],
-//               ),
-//             ],
-//           ),
-//         );
-//       },
-//     );
-
-//     if (created == true) {
-//       await _loadFeed();
-//     }
-//   }
 
 //   @override
 //   Widget build(BuildContext context) {
 //     return Scaffold(
 //       backgroundColor: AppColors.background,
+
 //       appBar: AppBar(
 //         title: const Text(
 //           'Community',
@@ -1159,176 +959,62 @@ class _CommentTile extends StatelessWidget {
 //         backgroundColor: AppColors.background,
 //         elevation: 0,
 //         automaticallyImplyLeading: false,
+//         // --- LOGIC FIX HERE ---
 //         actions: [
-//           // chat icon (matches your screenshot)
-//           IconButton(
-//             icon: const Icon(Icons.chat_bubble_outline, color: AppColors.lighterblue),
-//             onPressed: () {
-//               // you can later connect this to "new post" or "messages".
-//               // keeping your existing messages screen logic under role control:
-//               if (widget.userRole != UserRole.guardian) {
+//           // Only show this button if the user is NOT a parent
+//           if (userRole != UserRole.guardian) 
+//             IconButton(
+//               icon: const Icon(Icons.messenger, color: AppColors.lighterblue),
+//               onPressed: () {
 //                 Navigator.push(
 //                   context,
-//                   MaterialPageRoute(builder: (context) => const MessagesScreen()),
+//                   MaterialPageRoute(
+//                     // Make sure this matches your actual file/class name
+//                     builder: (context) => const MessagesScreen(), 
+//                   ),
 //                 );
-//               }
-//             },
-//           ),
-//           const SizedBox(width: 6),
+//               },
+//             ),
+            
+//           const SizedBox(width: 10),
 //         ],
 //       ),
-//       floatingActionButton: FloatingActionButton(
-//         backgroundColor: AppColors.lighterblue,
-//         onPressed: _openCreatePostSheet,
-//         child: const Icon(Icons.add, color: AppColors.background),
-//       ),
+
 //       body: SafeArea(
-//         child: Column(
+//         child: ListView(
+//           padding: const EdgeInsets.all(20),
 //           children: [
-//             // Search (top)
-//             Padding(
-//               padding: const EdgeInsets.fromLTRB(20, 10, 20, 10),
-//               child: TextField(
-//                 controller: _searchCtrl,
-//                 decoration: InputDecoration(
-//                   hintText: "Search topics...",
-//                   hintStyle: const TextStyle(color: AppColors.lighterblue),
-//                   prefixIcon: const Icon(Icons.search, color: AppColors.blue),
-//                   filled: true,
-//                   fillColor: AppColors.blue.withOpacity(0.18),
-//                   border: OutlineInputBorder(
-//                     borderRadius: BorderRadius.circular(16),
-//                     borderSide: BorderSide.none,
-//                   ),
-//                   contentPadding: const EdgeInsets.symmetric(vertical: 14),
+//             // Search
+//             TextField(
+//               decoration: InputDecoration(
+//                 hintText: "Search topics...",
+//                 hintStyle: const TextStyle(color: AppColors.lighterblue),
+//                 prefixIcon: const Icon(Icons.search, color: AppColors.blue),
+//                 filled: true,
+//                 fillColor: AppColors.blue.withOpacity(0.3),
+//                 border: OutlineInputBorder(
+//                   borderRadius: BorderRadius.circular(12),
+//                   borderSide: BorderSide.none,
 //                 ),
 //               ),
 //             ),
 
-//             Expanded(
-//               child: RefreshIndicator(
-//                 onRefresh: _loadFeed,
-//                 child: _buildBody(),
-//               ),
+//             const SizedBox(height: 16),
+
+//             // Example post
+//             const CommunityPostCard(
+//               author: "Mindfulness Coach",
+//               time: "2 hours ago",
+//               content:
+//                   "Reminder 🌱\n\nTake a slow breath in through your nose, "
+//                   "hold for 4 seconds, and gently release.\n\n"
+//                   "You’re doing better than you think.",
+//               likes: 24,
+//               comments: 5,
 //             ),
 //           ],
 //         ),
 //       ),
-//     );
-//   }
-
-//   Widget _buildBody() {
-//     if (_loading) {
-//       return ListView(
-//         padding: const EdgeInsets.all(20),
-//         children: const [
-//           SizedBox(height: 40),
-//           Center(child: CircularProgressIndicator()),
-//         ],
-//       );
-//     }
-
-//     if (_error != null) {
-//       return ListView(
-//         padding: const EdgeInsets.all(20),
-//         children: [
-//           const SizedBox(height: 30),
-//           Text(
-//             "Couldn’t load community feed.",
-//             style: const TextStyle(
-//               color: AppColors.textDark,
-//               fontSize: 16,
-//               fontWeight: FontWeight.w600,
-//             ),
-//           ),
-//           const SizedBox(height: 8),
-//           Text(
-//             _error!,
-//             style: TextStyle(color: AppColors.textDark.withOpacity(0.6)),
-//           ),
-//           const SizedBox(height: 12),
-//           ElevatedButton(
-//             onPressed: _loadFeed,
-//             style: ElevatedButton.styleFrom(
-//               backgroundColor: AppColors.lighterblue,
-//               foregroundColor: AppColors.background,
-//               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-//             ),
-//             child: const Text("Retry"),
-//           ),
-//         ],
-//       );
-//     }
-
-//     if (_filteredPosts.isEmpty) {
-//       return ListView(
-//         padding: const EdgeInsets.all(20),
-//         children: [
-//           const SizedBox(height: 30),
-//           Text(
-//             _searchCtrl.text.trim().isEmpty
-//                 ? "No posts yet. Be the first to post."
-//                 : "No results for \"${_searchCtrl.text.trim()}\"",
-//             style: TextStyle(color: AppColors.textDark.withOpacity(0.75)),
-//           ),
-//           const SizedBox(height: 12),
-//           // Keep a card that matches your screenshot even when empty
-//           const CommunityPostCard(
-//             author: "Mindfulness Coach",
-//             time: "2 hours ago",
-//             content:
-//                 "Reminder 🌱\n\nTake a slow breath in through your nose, hold for 4 seconds, and gently release.\n\nYou’re doing better than you think.",
-//             likes: 24,
-//             comments: 5,
-//           ),
-//         ],
-//       );
-//     }
-
-//     return ListView.builder(
-//       padding: const EdgeInsets.fromLTRB(20, 6, 20, 20),
-//       itemCount: _filteredPosts.length,
-//       itemBuilder: (context, index) {
-//         final p = _filteredPosts[index];
-//         final author = p["author"] as Map<String, dynamic>? ?? {};
-//         final authorName = (author["name"] ?? author["username"] ?? "Unknown").toString();
-
-//         return CommunityPostCard(
-//           author: authorName,
-//           time: _relativeTime(p["date_created"] as num?),
-//           content: (p["content"] ?? "").toString(),
-//           likes: (p["likes"] ?? 0) as int,
-//           comments: (p["comments"] ?? 0) as int,
-//           likedByMe: (p["liked_by_me"] ?? false) as bool,
-//           onLikeTap: () async {
-//             final postId = (p["id"] ?? 0) as int;
-//             final liked = (p["liked_by_me"] ?? false) as bool;
-
-//             // Optimistic UI
-//             setState(() {
-//               p["liked_by_me"] = !liked;
-//               p["likes"] = (p["likes"] ?? 0) + (liked ? -1 : 1);
-//             });
-
-//             try {
-//               if (!liked) {
-//                 final res = await ApiService.likePost(postId: postId, userId: _currentUserId);
-//                 p["likes"] = res["likes"] ?? p["likes"];
-//               } else {
-//                 final res = await ApiService.unlikePost(postId: postId, userId: _currentUserId);
-//                 p["likes"] = res["likes"] ?? p["likes"];
-//               }
-//               if (mounted) setState(() {});
-//             } catch (_) {
-//               // rollback if failed
-//               setState(() {
-//                 p["liked_by_me"] = liked;
-//                 p["likes"] = (p["likes"] ?? 0) + (liked ? 0 : -1) + (liked ? 1 : 0);
-//               });
-//             }
-//           },
-//         );
-//       },
 //     );
 //   }
 // }
@@ -1340,9 +1026,6 @@ class _CommentTile extends StatelessWidget {
 //   final int likes;
 //   final int comments;
 
-//   final bool likedByMe;
-//   final VoidCallback? onLikeTap;
-
 //   const CommunityPostCard({
 //     super.key,
 //     required this.author,
@@ -1350,70 +1033,53 @@ class _CommentTile extends StatelessWidget {
 //     required this.content,
 //     required this.likes,
 //     required this.comments,
-//     this.likedByMe = false,
-//     this.onLikeTap,
 //   });
 
 //   @override
 //   Widget build(BuildContext context) {
-//     final firstLetter = author.isNotEmpty ? author[0].toUpperCase() : "?";
-
 //     return Container(
 //       margin: const EdgeInsets.only(bottom: 16),
 //       padding: const EdgeInsets.all(16),
 //       decoration: BoxDecoration(
-//         color: AppColors.blue.withOpacity(0.18),
-//         borderRadius: BorderRadius.circular(18),
-//         border: Border.all(color: Colors.white.withOpacity(0.08)),
-//         boxShadow: [
-//           BoxShadow(
-//             color: Colors.black.withOpacity(0.04),
-//             blurRadius: 18,
-//             offset: const Offset(0, 8),
-//           )
-//         ],
+//         color: AppColors.blue.withOpacity(0.25),
+//         borderRadius: BorderRadius.circular(16),
 //       ),
 //       child: Column(
 //         crossAxisAlignment: CrossAxisAlignment.start,
 //         children: [
-//           // Header (avatar + name + time)
+//           // Header
 //           Row(
 //             children: [
 //               CircleAvatar(
 //                 radius: 18,
-//                 backgroundColor: AppColors.lighterblue.withOpacity(0.35),
+//                 backgroundColor: AppColors.lighterblue,
 //                 child: Text(
-//                   firstLetter,
+//                   author[0],
 //                   style: const TextStyle(
-//                     color: AppColors.titletext,
-//                     fontWeight: FontWeight.w600,
+//                     color: AppColors.background,
+//                     fontWeight: FontWeight.bold,
 //                   ),
 //                 ),
 //               ),
 //               const SizedBox(width: 10),
-//               Expanded(
-//                 child: Column(
-//                   crossAxisAlignment: CrossAxisAlignment.start,
-//                   children: [
-//                     Text(
-//                       author,
-//                       maxLines: 1,
-//                       overflow: TextOverflow.ellipsis,
-//                       style: const TextStyle(
-//                         color: AppColors.titletext,
-//                         fontWeight: FontWeight.w600,
-//                       ),
+//               Column(
+//                 crossAxisAlignment: CrossAxisAlignment.start,
+//                 children: [
+//                   Text(
+//                     author,
+//                     style: const TextStyle(
+//                       color: AppColors.textDark,
+//                       fontWeight: FontWeight.w600,
 //                     ),
-//                     const SizedBox(height: 2),
-//                     Text(
-//                       time,
-//                       style: TextStyle(
-//                         color: AppColors.textDark.withOpacity(0.55),
-//                         fontSize: 12,
-//                       ),
+//                   ),
+//                   Text(
+//                     time,
+//                     style: TextStyle(
+//                       color: AppColors.textDark.withOpacity(0.6),
+//                       fontSize: 12,
 //                     ),
-//                   ],
-//                 ),
+//                   ),
+//                 ],
 //               ),
 //             ],
 //           ),
@@ -1426,51 +1092,26 @@ class _CommentTile extends StatelessWidget {
 //             style: const TextStyle(
 //               color: AppColors.textDark,
 //               fontSize: 14,
-//               height: 1.45,
+//               height: 1.4,
 //             ),
 //           ),
 
-//           const SizedBox(height: 14),
+//           const SizedBox(height: 12),
 
-//           // Actions (like + comment)
+//           // Actions
 //           Row(
 //             children: [
-//               InkWell(
-//                 onTap: onLikeTap,
-//                 borderRadius: BorderRadius.circular(20),
-//                 child: Padding(
-//                   padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-//                   child: Row(
-//                     children: [
-//                       Icon(
-//                         likedByMe ? Icons.favorite : Icons.favorite_border,
-//                         size: 18,
-//                         color: AppColors.lighterblue,
-//                       ),
-//                       const SizedBox(width: 4),
-//                       Text(
-//                         "$likes",
-//                         style: const TextStyle(color: AppColors.textDark),
-//                       ),
-//                     ],
-//                   ),
-//                 ),
-//               ),
-//               const SizedBox(width: 12),
-//               Row(
-//                 children: [
-//                   const Icon(
-//                     Icons.chat_bubble_outline,
-//                     size: 18,
-//                     color: AppColors.lighterblue,
-//                   ),
-//                   const SizedBox(width: 4),
-//                   Text(
-//                     "$comments",
-//                     style: const TextStyle(color: AppColors.textDark),
-//                   ),
-//                 ],
-//               ),
+//               Icon(Icons.favorite_border,
+//                   size: 18, color: AppColors.lighterblue),
+//               const SizedBox(width: 4),
+//               Text("$likes",
+//                   style: const TextStyle(color: AppColors.textDark)),
+//               const SizedBox(width: 16),
+//               Icon(Icons.chat_bubble_outline,
+//                   size: 18, color: AppColors.lighterblue),
+//               const SizedBox(width: 4),
+//               Text("$comments",
+//                   style: const TextStyle(color: AppColors.textDark)),
 //             ],
 //           ),
 //         ],
@@ -1478,194 +1119,3 @@ class _CommentTile extends StatelessWidget {
 //     );
 //   }
 // }
-
-
-
-
-// // import 'package:flutter/material.dart';
-// // import '../../../theme/app_colors.dart';
-// // import 'chat_screen.dart';
-// // import 'package:flutter_application_1/user_role.dart';
-
-// // class CommunityScreen extends StatelessWidget {
-// //   const CommunityScreen({super.key, required this.userRole});
-// //   final UserRole userRole;
-
-
-// //   @override
-// //   Widget build(BuildContext context) {
-// //     return Scaffold(
-// //       backgroundColor: AppColors.background,
-
-// //       appBar: AppBar(
-// //         title: const Text(
-// //           'Community',
-// //           style: TextStyle(
-// //             color: AppColors.titletext,
-// //             fontWeight: FontWeight.w500,
-// //             fontSize: 20,
-// //           ),
-// //         ),
-// //         backgroundColor: AppColors.background,
-// //         elevation: 0,
-// //         automaticallyImplyLeading: false,
-// //         // --- LOGIC FIX HERE ---
-// //         actions: [
-// //           // Only show this button if the user is NOT a parent
-// //           if (userRole != UserRole.guardian) 
-// //             IconButton(
-// //               icon: const Icon(Icons.messenger, color: AppColors.lighterblue),
-// //               onPressed: () {
-// //                 Navigator.push(
-// //                   context,
-// //                   MaterialPageRoute(
-// //                     // Make sure this matches your actual file/class name
-// //                     builder: (context) => const MessagesScreen(), 
-// //                   ),
-// //                 );
-// //               },
-// //             ),
-            
-// //           const SizedBox(width: 10),
-// //         ],
-// //       ),
-
-// //       body: SafeArea(
-// //         child: ListView(
-// //           padding: const EdgeInsets.all(20),
-// //           children: [
-// //             // Search
-// //             TextField(
-// //               decoration: InputDecoration(
-// //                 hintText: "Search topics...",
-// //                 hintStyle: const TextStyle(color: AppColors.lighterblue),
-// //                 prefixIcon: const Icon(Icons.search, color: AppColors.blue),
-// //                 filled: true,
-// //                 fillColor: AppColors.blue.withOpacity(0.3),
-// //                 border: OutlineInputBorder(
-// //                   borderRadius: BorderRadius.circular(12),
-// //                   borderSide: BorderSide.none,
-// //                 ),
-// //               ),
-// //             ),
-
-// //             const SizedBox(height: 16),
-
-// //             // Example post
-// //             const CommunityPostCard(
-// //               author: "Mindfulness Coach",
-// //               time: "2 hours ago",
-// //               content:
-// //                   "Reminder 🌱\n\nTake a slow breath in through your nose, "
-// //                   "hold for 4 seconds, and gently release.\n\n"
-// //                   "You’re doing better than you think.",
-// //               likes: 24,
-// //               comments: 5,
-// //             ),
-// //           ],
-// //         ),
-// //       ),
-// //     );
-// //   }
-// // }
-
-// // class CommunityPostCard extends StatelessWidget {
-// //   final String author;
-// //   final String time;
-// //   final String content;
-// //   final int likes;
-// //   final int comments;
-
-// //   const CommunityPostCard({
-// //     super.key,
-// //     required this.author,
-// //     required this.time,
-// //     required this.content,
-// //     required this.likes,
-// //     required this.comments,
-// //   });
-
-// //   @override
-// //   Widget build(BuildContext context) {
-// //     return Container(
-// //       margin: const EdgeInsets.only(bottom: 16),
-// //       padding: const EdgeInsets.all(16),
-// //       decoration: BoxDecoration(
-// //         color: AppColors.blue.withOpacity(0.25),
-// //         borderRadius: BorderRadius.circular(16),
-// //       ),
-// //       child: Column(
-// //         crossAxisAlignment: CrossAxisAlignment.start,
-// //         children: [
-// //           // Header
-// //           Row(
-// //             children: [
-// //               CircleAvatar(
-// //                 radius: 18,
-// //                 backgroundColor: AppColors.lighterblue,
-// //                 child: Text(
-// //                   author[0],
-// //                   style: const TextStyle(
-// //                     color: AppColors.background,
-// //                     fontWeight: FontWeight.bold,
-// //                   ),
-// //                 ),
-// //               ),
-// //               const SizedBox(width: 10),
-// //               Column(
-// //                 crossAxisAlignment: CrossAxisAlignment.start,
-// //                 children: [
-// //                   Text(
-// //                     author,
-// //                     style: const TextStyle(
-// //                       color: AppColors.textDark,
-// //                       fontWeight: FontWeight.w600,
-// //                     ),
-// //                   ),
-// //                   Text(
-// //                     time,
-// //                     style: TextStyle(
-// //                       color: AppColors.textDark.withOpacity(0.6),
-// //                       fontSize: 12,
-// //                     ),
-// //                   ),
-// //                 ],
-// //               ),
-// //             ],
-// //           ),
-
-// //           const SizedBox(height: 12),
-
-// //           // Content
-// //           Text(
-// //             content,
-// //             style: const TextStyle(
-// //               color: AppColors.textDark,
-// //               fontSize: 14,
-// //               height: 1.4,
-// //             ),
-// //           ),
-
-// //           const SizedBox(height: 12),
-
-// //           // Actions
-// //           Row(
-// //             children: [
-// //               Icon(Icons.favorite_border,
-// //                   size: 18, color: AppColors.lighterblue),
-// //               const SizedBox(width: 4),
-// //               Text("$likes",
-// //                   style: const TextStyle(color: AppColors.textDark)),
-// //               const SizedBox(width: 16),
-// //               Icon(Icons.chat_bubble_outline,
-// //                   size: 18, color: AppColors.lighterblue),
-// //               const SizedBox(width: 4),
-// //               Text("$comments",
-// //                   style: const TextStyle(color: AppColors.textDark)),
-// //             ],
-// //           ),
-// //         ],
-// //       ),
-// //     );
-// //   }
-// // }
