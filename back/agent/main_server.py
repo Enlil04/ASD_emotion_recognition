@@ -19,6 +19,9 @@ from react_agent import AgenticBrain
 from analytics.vision_models.emotion_detector import EmotionDetector, MODEL_FILE
 from services.video_service import VideoProcessor
 
+
+from services.analytics import _calculate_stats, _fetch_recent_raw_logs, _is_new_user
+
 # Ensure tables exist (using the imported engine)
 Base.metadata.create_all(bind=engine)
 
@@ -52,45 +55,57 @@ def _get_last_7_days() -> list[str]:
     today = date.today()
     return [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in reversed(range(7))]
 
+import json
+import sqlite3
+
 def _fetch_emotion_totals_last_7_days(user_id: str) -> dict:
     """
-    Totals across last 7 days (from emotion_daily):
-      {
-        "totals": {"Happy": 12, "Sad": 3, ...},
-        "total": 30,
-        "dominant": "Happy",
-        "percent": {"Happy": 0.4, ...}
-      }
+    Aggregates total emotion counts for the last 7 days from the emotion_daily summary table.
     """
     days = _get_last_7_days()
-
-    emotions = ["Happy", "Sad", "Anger", "Fear", "Surprise", "Disgust", "Neutral"]
-    totals = {e: 0 for e in emotions}
+    start_date = days[0]
+    
+    # Initialize totals with 0 to ensure all keys exist
+    totals = {
+        "Happy": 0, "Sad": 0, "Neutral": 0, "Anger": 0, 
+        "Fear": 0, "Surprise": 0, "Disgust": 0
+    }
 
     con = sqlite3.connect(DB_PATH)
     try:
+        # Fetch the JSON blobs for the last 7 days
         rows = con.execute(
-            """
-            SELECT emotion, SUM(count) as total_count
-            FROM emotion_daily
-            WHERE user_id = ?
-              AND day >= ?
-            GROUP BY emotion
-            """,
-            (user_id, days[0]),
+            "SELECT emotion_counts FROM emotion_daily WHERE user_id = ? AND date_str >= ?",
+            (user_id, start_date),
         ).fetchall()
+
+        for (counts_json,) in rows:
+            if not counts_json:
+                continue
+            
+            try:
+                # Parse JSON: {"Happy": 15, "Neutral": 5, ...}
+                day_data = json.loads(counts_json)
+                
+                # Sum the values into our running totals
+                for emo, count in day_data.items():
+                    # Normalize key casing if necessary, or just sum directly
+                    # (assuming keys in JSON match the keys in 'totals')
+                    if emo in totals:
+                        totals[emo] += int(count)
+                    else:
+                        # Handle potential new/unexpected keys safely
+                        totals[emo] = totals.get(emo, 0) + int(count)
+                        
+            except (ValueError, TypeError):
+                continue
+                
     finally:
         con.close()
 
-    for emo, cnt in rows:
-        if emo in totals:
-            totals[emo] = int(cnt or 0)
-
-    total = sum(totals.values())
-    dominant = max(totals, key=lambda k: totals[k]) if total > 0 else "Neutral"
-    percent = {e: (totals[e] / total) if total > 0 else 0.0 for e in emotions}
-
-    return {"totals": totals, "total": total, "dominant": dominant, "percent": percent}
+    return totals
+import json
+import sqlite3
 
 def _fetch_emotion_daily(user_id: str) -> dict:
     days = _get_last_7_days()
@@ -100,11 +115,59 @@ def _fetch_emotion_daily(user_id: str) -> dict:
 
     con = sqlite3.connect(DB_PATH)
     try:
+        # ✅ Corrected Query: Only fetch date and the JSON blob
         rows = con.execute(
             """
-            SELECT day, emotion, emotion_counts
+            SELECT date_str, emotion_counts
             FROM emotion_daily
-            WHERE user_id = ? AND day >= ?
+            WHERE user_id = ? AND date_str >= ?
+            """,
+            (user_id, days[0]),
+        ).fetchall()
+
+        for d, counts_json in rows:
+            if d not in day_set: continue
+            
+            # ✅ Parse the JSON data
+            try:
+                daily_data = json.loads(counts_json) # e.g. {"Happy": 10, "Sad": 2}
+            except (ValueError, TypeError):
+                continue
+
+            # ✅ Iterate through the parsed dictionary
+            for emo, cnt in daily_data.items():
+                series_counts.setdefault(emo, {dd: 0 for dd in days})
+                series_counts[emo][d] += int(cnt)
+                totals[d] += int(cnt)
+                
+    finally:
+        con.close()
+
+    # --- (The rest of your aggregation logic remains exactly the same) ---
+    series: dict[str, list[float]] = {}
+    for emo, per_day in series_counts.items():
+        series[emo] = [
+            (per_day[d] / totals[d]) if totals[d] > 0 else 0.0
+            for d in days
+        ]
+    
+    # Fill missing keys ensures the chart always has colors for every emotion
+    for emo in ["Happy", "Sad", "Anger", "Fear", "Surprise", "Disgust", "Neutral"]:
+        series.setdefault(emo, [0.0] * 7)
+
+    return {"days": days, "series": series}
+    days = _get_last_7_days()
+    day_set = set(days)
+    series_counts: dict[str, dict[str, int]] = {}
+    totals: dict[str, int] = {d: 0 for d in days}
+
+    con = sqlite3.connect(DB_PATH)
+    try:
+        rows = con.execute(
+            """
+            SELECT date_str, emotion, emotion_counts
+            FROM emotion_daily
+            WHERE user_id = ? AND date_str >= ?
             """,
             (user_id, days[0]),
         ).fetchall()
@@ -274,6 +337,8 @@ def _is_new_user(user_id: str) -> bool:
     return row is None
 
 
+from fastapi.concurrency import run_in_threadpool
+
 @app.get("/api/recommendation/today")
 async def daily_recommendation(user_id: str = "user_001"):
     """
@@ -283,82 +348,107 @@ async def daily_recommendation(user_id: str = "user_001"):
     - onboarding if new user / no data
     """
     today_str = date.today().isoformat()
-    if brain is None:
-        return {"date": today_str, "recommendation": "Brain not ready."}
+    
+    # 1. Fetch Weekly Data (from emotion_daily summary)
+    weekly_counts = _fetch_emotion_totals_last_7_days(user_id)
+    week_stats = _calculate_stats(weekly_counts)
 
-    week = _fetch_emotion_totals_last_7_days(user_id)
-    weekly_total = week["total"]
+    # 2. Fetch Recent Data (Fallback to raw logs if weekly is empty)
+    recent_counts = {}
+    recent_stats = {"total": 0}
+    
+    if week_stats["total"] == 0:
+        recent_counts = _fetch_recent_raw_logs(user_id, hours=72)
+        recent_stats = _calculate_stats(recent_counts)
 
-    recent = _fetch_emotion_totals_last_7_days(user_id, hours=72)
     is_new = _is_new_user(user_id)
 
-    if weekly_total > 0:
+    # 3. Determine Mode
+    if week_stats["total"] > 0:
         mode = "weekly"
-        dominant = week["dominant"]
-        stats_text = f"""weekly emotion summary:
-        - Total emotions logged: {week['total']}
-        - Dominant emotion: {dominant}
-        -percentages: {week['percent']}""".strip()
-
-    elif recent is not None:
+        dominant = week_stats["dominant"]
+        stats_text = (
+            f"Weekly emotion summary (last 7 days):\n"
+            f"- Total logged: {week_stats['total']}\n"
+            f"- Dominant: {dominant}\n"
+            f"- Breakdown: {week_stats['percent']}"
+        )
+    elif recent_stats["total"] > 0:
         mode = "recent"
-        dominant = recent["dominant"]
-        stats_text = f"""
-        recent emotion summary (last 72h):
-        - Total emotions logged: {recent['total']}
-        - Dominant emotion: {dominant}
-        - percentages: {recent['percent']}""".strip()
-
+        dominant = recent_stats["dominant"]
+        stats_text = (
+            f"Recent emotion summary (last 72h raw logs):\n"
+            f"- Total logged: {recent_stats['total']}\n"
+            f"- Dominant: {dominant}\n"
+            f"- Breakdown: {recent_stats['percent']}"
+        )
     elif is_new:
         mode = "new_user"
         dominant = "Neutral"
-        stats_text = "new user detected, no emotion history yet.".strip()
-
+        stats_text = "New user detected, no emotion history yet."
     else:
         mode = "none"
         dominant = "Neutral"
-        stats_text = "no emotion data available.".strip()
+        stats_text = "No emotion data available."
 
+    # 4. Prepare Vision/System State (Safe access)
+    # Ensure system_state exists, otherwise default to empty
+    current_state = globals().get("system_state", {})
     vision_packet = {
-        "emotion": system_state.get("latest_emotion", "Neutral"),
-        "face_detected": system_state.get("face_detected", False),
+        "emotion": current_state.get("latest_emotion", "Neutral"),
+        "face_detected": current_state.get("face_detected", False),
         "timestamp": time.time(),
     }
 
+    # 5. Construct Prompt
     if mode in ("new_user", "none"):
-        prompt = f"""
-    Today is {today_str}.
-    {stats_text}
-
-    TASK:    
-    Welcome the user briefly, explain that recommendations personalize after a few check-ins,
-    and give ONE small actionable suggestion they can do now (breathing, short walk, hydration, journaling prompt).
-    Keep it 1-2 short sentences.""".strip()
+        prompt = (
+            f"Today is {today_str}.\n"
+            f"{stats_text}\n\n"
+            f"TASK:\n"
+            f"Welcome the user briefly, explain that recommendations personalize after a few check-ins, "
+            f"and give ONE small actionable suggestion they can do now (breathing, short walk, hydration).\n"
+            f"Keep it 1-2 short sentences."
+        )
     else:
-        prompt = f"""
+        prompt = (
+            f"Today is {today_str}.\n"
+            f"{stats_text}\n\n"
+            f"Current mood right now (latest detected): {vision_packet['emotion']}.\n\n"
+            f"TASK:\n"
+            f"Give ONE practical recommendation for today tailored to the chosen dominant emotion: {dominant}.\n"
+            f"- If dominant is Angry or Sad: suggest calming / coping / support.\n"
+            f"- If dominant is Happy: suggest maintaining habits + a small growth challenge.\n"
+            f"- If dominant is Neutral: suggest exploration + gentle routine.\n"
+            f"Keep it 1–2 short sentences. Be specific and actionable."
+        )
 
-    Today is {today_str}.
-    {stats_text}
-
-    current mood right now (latest detected) {vision_packet["emotion"]}.
-
-    Task:
-    Give ONE practical recommendation for today tailored to the chosen dominant emotion: {dominant}.
-    - If dominant is Angry or Sad: use calming / coping / support suggestions.
-    - If dominant is Happy: suggest maintaining habits + a small growth challenge.
-    - If dominant is Neutral: suggest exploration + gentle routine.
-    Keep it 1–2 short sentences. Be specific and actionable.""".strip()
-        
+    # 6. Execute AI Decision (Check if brain exists)
+    brain_module = globals().get("brain")
+    if not brain_module:
+        return {
+            "date": today_str, 
+            "mode": "error", 
+            "recommendation": "AI Brain module not loaded."
+        }
 
     response_text = await run_in_threadpool(
-        brain.decide_response,
+        brain_module.decide_response,
         vision_data=vision_packet,
         prompt_text=prompt,
-        extra_context={"weekly_7d": week, "mode": mode, "dominant": dominant},
+        extra_context={
+            "weekly_stats": week_stats, 
+            "mode": mode, 
+            "dominant": dominant
+        },
     )
-    return {"date": today_str, "mode": mode, "dominant": dominant, "recommendation": response_text}
 
-
+    return {
+        "date": today_str, 
+        "mode": mode, 
+        "dominant": dominant, 
+        "recommendation": response_text
+    }
 
 # ==============================
 # COMMUNITY + USERS API (new)
