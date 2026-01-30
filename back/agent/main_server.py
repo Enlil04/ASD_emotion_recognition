@@ -1,6 +1,7 @@
 import os
 import time
 import sqlite3
+from realtime import Optional
 import uvicorn
 from datetime import date, timedelta
 
@@ -46,18 +47,21 @@ class ChatMessage(BaseModel):
 # HELPER FUNCTIONS
 # -----------------------------------------------------------------
 
+
 def _get_last_7_days() -> list[str]:
     today = date.today()
     return [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in reversed(range(7))]
 
-def _fetch_emotion_totals_last_7_days(user_id: str) -> dict:
+def _fetch_emotion_totals_last_7_days(user_id: str, hours: int = 72) -> Optional[str]:
+    since_ts = time.time() - (hours * 3600)
+
     days = _get_last_7_days()
     # Use the imported DB_PATH to ensure we read the correct file
     con = sqlite3.connect(DB_PATH) 
     try:
         rows = con.execute(
             """
-            SELECT emotion, SUM(count) as total_count
+            SELECT emotion, SUM(emotion_counts) as total_count
             FROM emotion_daily
             WHERE user_id = ? AND day >= ?
             GROUP BY emotion
@@ -90,7 +94,7 @@ def _fetch_emotion_daily(user_id: str) -> dict:
     try:
         rows = con.execute(
             """
-            SELECT day, emotion, count
+            SELECT day, emotion, emotion_counts
             FROM emotion_daily
             WHERE user_id = ? AND day >= ?
             """,
@@ -138,40 +142,10 @@ def startup_event():
 
 @app.get("/api/emotions/weekly")
 async def weekly_emotions(user_id: str = "user_001"):
+    """Weekly mood series (last 7 days) used by dashboard.dart."""
     return _fetch_emotion_daily(user_id)
 
-@app.get("/api/recommendation/today")
-async def daily_recommendation(user_id: str = "user_001"):
-    today_str = date.today().isoformat()
-    if brain is None:
-        return {"date": today_str, "recommendation": "Brain not ready."}
-
-    week = _fetch_emotion_totals_last_7_days(user_id)
-    vision_packet = {
-        "emotion": system_state.get("latest_emotion", "Neutral"),
-        "face_detected": system_state.get("face_detected", False),
-        "timestamp": time.time(),
-    }
-
-    prompt = f"""
-    Today is {today_str}.
-    Weekly Summary: {week["totals"]} (Dominant: {week["dominant"]}).
-    Current Mood: {vision_packet["emotion"]}.
-    
-    Give ONE practical recommendation tailored to the dominant weekly emotion.
-    If Happy: suggest growth. If Sad/Neutral: suggest care.
-    Keep it 1 sentence.
-    """.strip()
-
-    response_text = await run_in_threadpool(
-        brain.decide_response,
-        vision_data=vision_packet,
-        prompt_text=prompt,
-        extra_context={"weekly_7d": week},
-    )
-    return {"date": today_str, "recommendation": response_text}
-
-@app.post("/api/chat")
+@app.post("/chat")
 async def chat_endpoint(chat: ChatMessage):
     if system_state["brain_busy"]:
         return {"response": "Thinking..."}
@@ -247,13 +221,13 @@ async def analyze_session_endpoint(
             ).first()
 
             if daily_entry:
-                daily_entry.count += 1
+                daily_entry.emotion_counts += 1
             else:
                 new_daily = models.DailySummary(
                     user_id="user_001",
                     day=today_str,
                     emotion=emotion,
-                    count=1
+                    emotion_counts=1
                 )
                 db.add(new_daily)
             
@@ -278,15 +252,107 @@ async def analyze_session_endpoint(
             try: os.remove(temp_path)
             except: pass
 
+
+
+def _is_new_user(user_id: str) -> bool:
+    con = sqlite3.connect(DB_PATH)  
+    try:
+        row = con.execute(
+            "SELECT 1 FROM emotion_logs WHERE user_id = ? LIMIT 1",
+            (user_id,),
+        ).fetchone()
+    finally:
+        con.close()
+    return row is None
+
+
+@app.get("/api/recommendation/today")
+async def daily_recommendation(user_id: str = "user_001"):
+    """
+    Generates a short daily recommendation based on:
+    - last 7 days emotion aggregates (emotion_daily)
+    - fallback to recent logs if no weekly data
+    - onboarding if new user / no data
+    """
+    today_str = date.today().isoformat()
+    if brain is None:
+        return {"date": today_str, "recommendation": "Brain not ready."}
+
+    week = _fetch_emotion_totals_last_7_days(user_id)
+    weekly_total = week["total"]
+
+    recent = _fetch_emotion_totals_last_7_days(user_id, hours=72)
+    is_new = _is_new_user(user_id)
+
+    if weekly_total > 0:
+        mode = "weekly"
+        dominant = week["dominant"]
+        stats_text = f"""weekly emotion summary:
+        - Total emotions logged: {week['total']}
+        - Dominant emotion: {dominant}
+        -percentages: {week['percent']}""".strip()
+
+    elif recent is not None:
+        mode = "recent"
+        dominant = recent["dominant"]
+        stats_text = f"""
+        recent emotion summary (last 72h):
+        - Total emotions logged: {recent['total']}
+        - Dominant emotion: {dominant}
+        - percentages: {recent['percent']}""".strip()
+
+    elif is_new:
+        mode = "new_user"
+        dominant = "Neutral"
+        stats_text = "new user detected, no emotion history yet.".strip()
+
+    else:
+        mode = "none"
+        dominant = "Neutral"
+        stats_text = "no emotion data available.".strip()
+
+    vision_packet = {
+        "emotion": system_state.get("latest_emotion", "Neutral"),
+        "face_detected": system_state.get("face_detected", False),
+        "timestamp": time.time(),
+    }
+
+    if mode in ("new_user", "none"):
+        prompt = f"""
+    Today is {today_str}.
+    {stats_text}
+
+    TASK:    
+    Welcome the user briefly, explain that recommendations personalize after a few check-ins,
+    and give ONE small actionable suggestion they can do now (breathing, short walk, hydration, journaling prompt).
+    Keep it 1-2 short sentences.""".strip()
+    else:
+        prompt = f"""
+
+    Today is {today_str}.
+    {stats_text}
+
+    current mood right now (latest detected) {vision_packet["emotion"]}.
+
+    Task:
+    Give ONE practical recommendation for today tailored to the chosen dominant emotion: {dominant}.
+    - If dominant is Angry or Sad: use calming / coping / support suggestions.
+    - If dominant is Happy: suggest maintaining habits + a small growth challenge.
+    - If dominant is Neutral: suggest exploration + gentle routine.
+    Keep it 1–2 short sentences. Be specific and actionable.""".strip()
+        
+
+    response_text = await run_in_threadpool(
+        brain.decide_response,
+        vision_data=vision_packet,
+        prompt_text=prompt,
+        extra_context={"weekly_7d": week, "mode": mode, "dominant": dominant},
+    )
+    return {"date": today_str, "mode": mode, "dominant": dominant, "recommendation": response_text}
+
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-
-
-
-
-
-
 
 
 

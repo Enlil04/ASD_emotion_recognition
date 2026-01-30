@@ -46,6 +46,47 @@ class LongTermMemoryStore:
         """)
         self.conn.commit()
 
+
+
+    def get_preferences(self, user_id):
+        """Retrieves the user's profile/preferences."""
+        self.cursor.execute("SELECT preferences_json FROM user_profiles WHERE user_id=?", (user_id,))
+        row = self.cursor.fetchone()
+        
+        if row:
+            try:
+                return json.loads(row[0])
+            except json.JSONDecodeError:
+                return {}
+        else:
+            # If no profile exists yet, return a safe default
+            return {"name": "User", "triggers": []}
+        
+
+    def update_preferences(self, user_id, new_prefs: dict):
+        """Saves/Updates user preferences."""
+        # Get existing to merge
+        current = self.get_preferences(user_id)
+        current.update(new_prefs)
+        
+        self.cursor.execute("""
+            INSERT OR REPLACE INTO user_profiles (user_id, preferences_json)
+            VALUES (?, ?)
+        """, (user_id, json.dumps(current)))
+        self.conn.commit()
+
+
+    def log_significant_event(self, user_id, event_type, description, context=None):
+        timestamp = time.time()
+        context_json = json.dumps(context) if context else "{}"
+        
+        self.cursor.execute("""
+            INSERT INTO significant_events (user_id, timestamp, event_type, description, context_json)
+            VALUES (?, ?, ?, ?, ?)
+        """, (user_id, timestamp, event_type, description, context_json))
+        self.conn.commit()
+
+
     def add_emotion_counts(self, user_id, date_str, new_counts):
         """Updates the daily aggregate for a specific user."""
         
@@ -99,7 +140,7 @@ class LongTermMemoryStore:
         sorted_emotions = sorted(grand_total.items(), key=lambda x: x[1], reverse=True)
         return ", ".join([f"{k} ({v})" for k, v in sorted_emotions[:3]])
 
-    def close(self):
+    def close(self):    
         self.conn.close()
 
 # --- HELPER FUNCTIONS ---
