@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_application_1/theme/app_colors.dart';
-import 'package:flutter_application_1/features/individual/bubble_breathing.dart';
+import 'package:flutter_application_1/features/games/breathing_bubble.dart';
 
 
 class GamesScreen extends StatelessWidget {

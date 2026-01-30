@@ -83,10 +83,6 @@ class ApiService {
     }
   }
 
-<<<<<<< HEAD
-
-=======
->>>>>>> eea1757f430c80e44c8d0a72eab3d366e5d66dec
   // ==============================
   // COMMUNITY ENDPOINTS
   // ==============================
@@ -290,14 +286,9 @@ class ApiService {
     }
   }
 
-<<<<<<< HEAD
-}
-=======
 
 
 }
 
 
 
-
->>>>>>> eea1757f430c80e44c8d0a72eab3d366e5d66dec

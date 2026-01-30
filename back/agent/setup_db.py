@@ -47,7 +47,7 @@ def setup_tables():
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
 
-    # Users Schema 
+    # 1. USERS
     cur.execute("""
     CREATE TABLE IF NOT EXISTS users (
         user_id TEXT PRIMARY KEY,
@@ -63,7 +63,8 @@ def setup_tables():
         created_at REAL,
         updated_at REAL
     )""")
-    # Community Posts table
+
+    # 2. COMMUNITY POSTS
     cur.execute("""
     CREATE TABLE IF NOT EXISTS community_posts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,7 +74,8 @@ def setup_tables():
         comments INTEGER DEFAULT 0,
         date_created REAL
     )""")
-    # Comments table
+
+    # 3. COMMENTS
     cur.execute("""
     CREATE TABLE IF NOT EXISTS comments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,7 +85,7 @@ def setup_tables():
         date_created REAL
     )""")
 
-    # likes table
+    # 4. POST LIKES
     cur.execute("""
     CREATE TABLE IF NOT EXISTS post_likes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,7 +94,8 @@ def setup_tables():
         date_created REAL,
         UNIQUE(post_id, user_id)
     )""")
-    # Emotion Logs table
+
+    # 5. EMOTION LOGS (Raw data)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS emotion_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,69 +103,60 @@ def setup_tables():
         emotion TEXT,
         confidence REAL,
         timestamp REAL
-    )
-    """)
-
-    # Daily Summary table
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS emotion_daily (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT,
-        day TEXT,
-        emotion TEXT,
-        emotion_counts INTEGER DEFAULT 0, 
-        updated_at REAL,
-        UNIQUE(user_id, day, emotion)
     )""")
 
-    # 1. NEW: INTERACTIONS TABLE (Chat History)
+    # 6. EMOTION DAILY (Summary) - CRITICAL: 'emotion_counts'
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS emotion_daily (
+        user_id TEXT,
+        date_str TEXT,
+        emotion_counts TEXT,
+        total_frames INTEGER,
+        PRIMARY KEY (user_id, date_str)
+    )""")
+
+    # 7. INTERACTIONS (Standardized for AI Chat)
+# --- TABLE 1: INTERACTIONS (Chat History) ---
     cur.execute("""
     CREATE TABLE IF NOT EXISTS interactions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id TEXT NOT NULL,
-        ts REAL NOT NULL,
+        timestamp REAL NOT NULL,        -- Matches 'timestamp' usage
         readable_time TEXT NOT NULL,
+<<<<<<< HEAD
         event_type TEXT NOT NULL,       -- 'conversation' or 'observation'
         user_input TEXT
+=======
+        event_type TEXT NOT NULL,       
+        user_input TEXT,
+        agent_response TEXT,
+        detected_emotion TEXT,
+        confidence REAL
+>>>>>>> 41b5596b9655c069b2c6e86136950a535324208a
     )""")
 
-    # 2. NEW: SIGNIFICANT EVENTS (Milestones/Triggers)
+    # 8. SIGNIFICANT EVENTS
     cur.execute("""
     CREATE TABLE IF NOT EXISTS significant_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id TEXT,
-        event_type TEXT, -- e.g., 'mood_swing', 'goal_reached'
+        timestamp REAL,                  -- Matches 'timestamp' usage
+        event_type TEXT,
         description TEXT,
-        timestamp REAL
+        context_json TEXT
     )""")
 
-    con.commit()
-    # seed_dummy_data(con)
-    con.close()
+    # 9. USER PROFILES
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS user_profiles (
+        user_id TEXT PRIMARY KEY,
+        preferences_json TEXT
+    )""")
 
-# def seed_dummy_data(con):
-#     """Seeds test data if the database is empty (From V2 logic)."""
-#     cur = con.cursor()
-#     # Check if we already have users
-#     if cur.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
-#         print("🌱 Seeding initial data...")
-#         now = time.time()
-#         cur.execute("""
-#             INSERT INTO users (user_id, username, name, role, streak) 
-#             VALUES ('user_001', 'test_user', 'Test User', 'member', 5)
-#         """)
-        
-#         # Seed 7 days of sample emotions
-#         today = datetime.now().date()
-#         for i in range(7):
-#             day = (today - timedelta(days=i)).strftime("%Y-%m-%d")
-#             cur.execute("""
-#                 INSERT INTO emotion_daily (user_id, day, emotion, emotion_counts, updated_at)
-#                 VALUES (?, ?, ?, ?, ?)
-#             """, ('user_001', day, 'Neutral', random.randint(5, 15), now))
-        
-#         con.commit()
-#         print("✅ Seeding complete.")
+    
+
+    con.commit()
+    con.close()
 
 # ==============================
 # 4. EXECUTION
