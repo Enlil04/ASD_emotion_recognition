@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_application_1/theme/app_colors.dart';
+import 'package:flutter_application_1/features/individual/bubble_breathing.dart';
 
 
 class GamesScreen extends StatelessWidget {
@@ -104,50 +105,58 @@ class GamesScreen extends StatelessWidget {
             ),
             ), 
             SizedBox(height: 10.0,),
-            Container(
-              padding: EdgeInsets.all(20.0),
-              decoration: BoxDecoration(
-                border: Border.all(color: AppColors.lighterblue,
-                width: 2.0,
-                style: BorderStyle.solid,
-                 ),
-                borderRadius: BorderRadius.circular(15.0)
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.spaceAround,
-                    children: [
-                      Text("Game Name", 
-                      style: TextStyle(
-                        color: AppColors.lighterblue, 
-                        fontSize: 18.0, 
-                        fontWeight: FontWeight.bold, 
-
-                      ),),
-                      SizedBox(height: 10.0,), 
-                      Text("2-3 Players",
-                      style: TextStyle(
-                        color: AppColors.textDark
-                      ),)
-                    ],
-                  ),
-                  Container(
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(18.0), 
-                      color: AppColors.lighterblue,
-                    ), 
-                    padding: EdgeInsets.all(8.0),
-                    child: Text("Level", 
-                    style: TextStyle(
-                      color: AppColors.textDark,
-                    ),),    
-                  )
+            InkWell(
+              onTap: (){
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => BubbleBreathingGame()),
+                );
+              },
+              child: Container(
+                padding: EdgeInsets.all(20.0),
+                decoration: BoxDecoration(
+                  border: Border.all(color: AppColors.lighterblue,
+                  width: 2.0,
+                  style: BorderStyle.solid,
+                   ),
+                  borderRadius: BorderRadius.circular(15.0)
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.spaceAround,
+                      children: [
+                        Text("Bubble Breathing", 
+                        style: TextStyle(
+                          color: AppColors.lighterblue, 
+                          fontSize: 18.0, 
+                          fontWeight: FontWeight.bold, 
               
-                ],
+                        ),),
+                        SizedBox(height: 10.0,), 
+                        Text("1 Player",
+                        style: TextStyle(
+                          color: AppColors.textDark
+                        ),)
+                      ],
+                    ),
+                    Container(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(18.0), 
+                        color: AppColors.lighterblue,
+                      ), 
+                      padding: EdgeInsets.all(8.0),
+                      child: Text("Easy", 
+                      style: TextStyle(
+                        color: AppColors.textDark,
+                      ),),    
+                    )
+                
+                  ],
+                ),
               ),
             ),
 
