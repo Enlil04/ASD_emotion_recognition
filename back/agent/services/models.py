@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 from __future__ import annotations
 
 from sqlalchemy import Column, Integer, String, Float, Text, UniqueConstraint, Index
@@ -132,6 +133,83 @@ class PostLike(Base):
     updated_at = Column(Float)
 
 # 3. USERS
+=======
+# from sqlalchemy import Column, Integer, String, Float
+# from setup_db import Base
+
+# # 1. EMOTION LOGS
+# class MoodSession(Base):
+#     __tablename__ = "emotion_logs"
+#     id = Column(Integer, primary_key=True, index=True)
+#     user_id = Column(String, index=True)
+#     emotion = Column(String, index=True)
+#     confidence = Column(Float)
+#     timestamp = Column(Float)  # ✅ CHANGED from 'ts' to 'timestamp'
+
+# # 2. DAILY SUMMARY
+# class DailySummary(Base):
+#     __tablename__ = "emotion_daily"
+#     id = Column(Integer, primary_key=True, index=True)
+#     user_id = Column(String, index=True)
+#     day = Column(String) 
+#     emotion = Column(String)
+#     emotion_counts = Column(Integer, default=0)
+#     updated_at = Column(Float)
+
+# # 3. USERS
+# class User(Base):
+#     __tablename__ = "users"
+#     user_id = Column(String, primary_key=True, index=True)
+#     username = Column(String, unique=True, index=True)
+#     name = Column(String)
+#     role = Column(String)
+#     age = Column(Integer)
+#     photo_url = Column(String)
+#     description = Column(String)
+#     connections = Column(Integer, default=0)
+#     streak = Column(Integer, default=0)
+#     preferences_json = Column(String)
+#     created_at = Column(Float)
+#     updated_at = Column(Float)
+
+# # 4. COMMUNITY POSTS
+# class CommunityPost(Base):
+#     __tablename__ = "community_posts"
+#     id = Column(Integer, primary_key=True, index=True)
+#     user_id = Column(String, index=True)
+#     content = Column(String)
+#     likes = Column(Integer, default=0)
+#     comments = Column(Integer, default=0)
+#     date_created = Column(Float)
+
+# # 5. COMMENTS
+# class Comment(Base):
+#     __tablename__ = "comments"
+#     id = Column(Integer, primary_key=True, index=True)
+#     post_id = Column(Integer, index=True)
+#     user_id = Column(String)
+#     content = Column(String)
+#     date_created = Column(Float)
+
+# # 6. INTERACTIONS
+# class Interaction(Base):
+#     __tablename__ = "interactions"
+#     id = Column(Integer, primary_key=True, index=True)
+#     user_id = Column(String, index=True)
+    
+#     # Standard AI Memory Columns
+#     role = Column(String)      
+#     content = Column(String)   
+#     timestamp = Column(Float)  # ✅ CHANGED from 'ts' to 'timestamp'
+    
+#     # Optional metadata
+#     readable_time = Column(String, nullable=True)
+#     event_type = Column(String, nullable=True)
+from sqlalchemy import Column, Integer, String, Float
+from setup_db import Base
+
+# 1. USERS
+>>>>>>> f097ba3bf547ebcc72d0f8aefc910dda298d2118
 class User(Base):
     __tablename__ = "users"
     user_id = Column(String, primary_key=True, index=True)
@@ -139,7 +217,7 @@ class User(Base):
     name = Column(String)
     role = Column(String)
     age = Column(Integer)
-    photo_url = Column(String)
+    photo = Column(String)  # ✅ CHANGED from photo_url to photo
     description = Column(String)
     connections = Column(Integer, default=0)
     streak = Column(Integer, default=0)
@@ -147,7 +225,7 @@ class User(Base):
     created_at = Column(Float)
     updated_at = Column(Float)
 
-# 4. COMMUNITY POSTS
+# 2. COMMUNITY POSTS
 class CommunityPost(Base):
     __tablename__ = "community_posts"
     id = Column(Integer, primary_key=True, index=True)
@@ -156,8 +234,9 @@ class CommunityPost(Base):
     likes = Column(Integer, default=0)
     comments = Column(Integer, default=0)
     date_created = Column(Float)
+    is_deleted = Column(Integer, default=0)
 
-# 5. COMMENTS
+# 3. COMMENTS
 class Comment(Base):
     __tablename__ = "comments"
     id = Column(Integer, primary_key=True, index=True)
@@ -166,11 +245,29 @@ class Comment(Base):
     content = Column(String)
     date_created = Column(Float)
 
+# 4. POST LIKES
+class PostLike(Base):
+    __tablename__ = "post_likes"
+    id = Column(Integer, primary_key=True, index=True)
+    post_id = Column(Integer, index=True)
+    user_id = Column(String, index=True)
+    date_created = Column(Float)
+
+# 5. COMMUNITY REPORTS
+class CommunityReport(Base):
+    __tablename__ = "community_reports"
+    id = Column(Integer, primary_key=True, index=True)
+    post_id = Column(Integer, index=True)
+    reporter_user_id = Column(String)
+    reason = Column(String)
+    date_created = Column(Float)
+
 # 6. INTERACTIONS
 class Interaction(Base):
     __tablename__ = "interactions"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(String, index=True)
+<<<<<<< HEAD
     
     # Standard AI Memory Columns
     role = Column(String)      
@@ -181,3 +278,29 @@ class Interaction(Base):
     readable_time = Column(String, nullable=True)
     event_type = Column(String, nullable=True)
 >>>>>>> 41b5596b9655c069b2c6e86136950a535324208a
+=======
+    timestamp = Column(Float)
+    readable_time = Column(String)
+    event_type = Column(String)
+    user_input = Column(String)      
+    agent_response = Column(String)  
+    detected_emotion = Column(String)
+    confidence = Column(Float)
+
+# 7. DAILY EMOTION SUMMARY
+class DailySummary(Base):
+    __tablename__ = "emotion_daily"
+    user_id = Column(String, primary_key=True)
+    date_str = Column(String, primary_key=True)
+    emotion_counts = Column(String) 
+    total_frames = Column(Integer)
+
+# 8. RAW EMOTION LOGS
+class MoodSession(Base):
+    __tablename__ = "emotion_logs"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, index=True)
+    emotion = Column(String)
+    confidence = Column(Float)
+    timestamp = Column(Float)
+>>>>>>> f097ba3bf547ebcc72d0f8aefc910dda298d2118
