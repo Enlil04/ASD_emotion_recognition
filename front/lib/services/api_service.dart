@@ -4,7 +4,7 @@ import 'package:http_parser/http_parser.dart';
 
 class ApiService {
   
-  static const String baseUrl = 'http://10.53.28.50:8000';
+  static const String baseUrl = 'http://192.168.0.106:8000';
 
   static Future<String> sendMessage(String message) async {
     try {
@@ -82,6 +82,18 @@ class ApiService {
       throw Exception("Recommendation endpoint failed: ${response.statusCode}");
     }
   }
+
+  static Future<Map<String, dynamic>> fetchLatestEmotion(String userId) async {
+  final url = Uri.parse("$baseUrl/api/emotions/latest?user_id=$userId");
+  final response = await http.get(url);
+
+  if (response.statusCode == 200) {
+    return jsonDecode(response.body) as Map<String, dynamic>;
+  } else {
+    throw Exception("Latest emotion endpoint failed: ${response.statusCode}");
+  }
+}
+
 
   // ==============================
   // COMMUNITY ENDPOINTS

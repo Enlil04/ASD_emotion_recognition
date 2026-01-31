@@ -30,8 +30,8 @@ class _DashboardInsightsScreenState extends State<DashboardInsightsScreen> {
   bool _loading = true;
   String? _loadError;
 
-  String latestDetectedEmotion = "Neutral";
-  double latestConfidence = 0.62; 
+  String latestDetectedEmotion = "No emotion Detected";
+  double latestConfidence = 0; 
 
   // URL removed: Using ApiService.baseUrl instead
 
@@ -41,43 +41,53 @@ class _DashboardInsightsScreenState extends State<DashboardInsightsScreen> {
     _loadDashboard();
   }
 
-  Future<void> _loadDashboard() async {
-    setState(() {
-      _loading = true;
-      _loadError = null;
-    });
+Future<void> _loadDashboard() async {
+  setState(() {
+    _loading = true;
+    _loadError = null;
+  });
 
-    try {
-      // 1) Weekly aggregates - Fetch via ApiService
-      final weeklyJson = await ApiService.fetchWeeklyEmotions("user_001");
-      
-      final days = (weeklyJson["days"] as List<dynamic>).map((e) => e.toString()).toList();
-      final series = (weeklyJson["series"] as Map<String, dynamic>);
+  try {
+    // 1) Weekly aggregates
+    final weeklyJson = await ApiService.fetchWeeklyEmotions("user_001");
 
-      final Map<String, List<double>> parsedSeries = {};
-      for (final entry in series.entries) {
-        final key = entry.key.toString();
-        final raw = entry.value as List<dynamic>;
-        parsedSeries[key] = raw.map((v) => (v as num).toDouble()).toList();
-      }
+    final days = (weeklyJson["days"] as List<dynamic>).map((e) => e.toString()).toList();
+    final series = (weeklyJson["series"] as Map<String, dynamic>);
 
-      // 2) Daily recommendation - Fetch via ApiService
-      final recJson = await ApiService.fetchDailyRecommendation("user_001");
-      final recText = (recJson["recommendation"] ?? "").toString();
-
-      setState(() {
-        last7Days = days;
-        weeklyEmotionSeries = parsedSeries;
-        dailyRecommendation = recText;
-        _loading = false;
-      });
-    } catch (e) {
-      setState(() {
-        _loadError = e.toString();
-        _loading = false;
-      });
+    final Map<String, List<double>> parsedSeries = {};
+    for (final entry in series.entries) {
+      final key = entry.key.toString();
+      final raw = entry.value as List<dynamic>;
+      parsedSeries[key] = raw.map((v) => (v as num).toDouble()).toList();
     }
+
+    // 2) Daily recommendation
+    final recJson = await ApiService.fetchDailyRecommendation("user_001");
+    final recText = (recJson["recommendation"] ?? "").toString();
+
+    // ✅ 3) Latest detected emotion (from emotion_logs)
+    final latestJson = await ApiService.fetchLatestEmotion("user_001");
+    final latestEmotion = (latestJson["emotion"] ?? "No emotion detected").toString();
+    final latestConf = (latestJson["confidence"] as num?)?.toDouble() ?? 0.0;
+
+    setState(() {
+      last7Days = days;
+      weeklyEmotionSeries = parsedSeries;
+      dailyRecommendation = recText;
+
+      // ✅ update the top "Latest detected" UI
+      latestDetectedEmotion = latestEmotion;
+      latestConfidence = latestConf;
+
+      _loading = false;
+    });
+  } catch (e) {
+    setState(() {
+      _loadError = e.toString();
+      _loading = false;
+    });
   }
+}
 
   @override
   Widget build(BuildContext context) {
@@ -173,15 +183,20 @@ class _DashboardInsightsScreenState extends State<DashboardInsightsScreen> {
             child: Icon(Icons.insights_rounded, size: 18, color: AppColors.titletext),
           ),
           const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              "Latest detected: $latestDetectedEmotion  •  ${(latestConfidence * 100).round()}% confidence",
-              style: const TextStyle(
-                color: AppColors.textDark,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
+         Expanded(
+              child: Text(
+                latestDetectedEmotion == "No emotion detected" ||
+                        latestDetectedEmotion.isEmpty
+                    ? "Latest detected: No emotion detected"
+                    : "Latest detected: $latestDetectedEmotion  •  ${latestConfidence.round()}% confidence",
+                style: const TextStyle(
+                  color: AppColors.textDark,
+                  fontWeight: FontWeight.w600,
+                ),
+  ),
+
+),
+
         ],
       ),
     );
