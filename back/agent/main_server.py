@@ -17,7 +17,7 @@ import services.models as models
 
 from react_agent import AgenticBrain
 from analytics.vision_models.emotion_detector import EmotionDetector, MODEL_FILE
-from services.video_service import VideoProcessor
+from services.video_service import video_service 
 
 
 from services.analytics import _calculate_stats, _fetch_recent_raw_logs, _is_new_user
@@ -39,8 +39,8 @@ system_state = {
 
 app = FastAPI()
 brain = None
-detector = None
-video_service = None
+# detector = None
+# video_service = None
 
 class ChatMessage(BaseModel):
     user_id: str
@@ -205,8 +205,8 @@ def startup_event():
     try:
         # Use imported DB_PATH
         brain = AgenticBrain(db_path=DB_PATH, user_id="user_001")
-        detector = EmotionDetector(MODEL_FILE)
-        video_service = VideoProcessor(detector)
+        # detector = EmotionDetector(MODEL_FILE)
+        # video_service = video_service(detector)
         print(f"✅ All systems go! Connected to DB at: {DB_PATH}")
     except Exception as e:
         print(f"❌ Startup Error: {e}")
@@ -245,6 +245,7 @@ async def chat_endpoint(chat: ChatMessage):
 # -----------------------------------------------------------------
 # THE VIDEO ENDPOINT (With Fixed DB Logic)
 # -----------------------------------------------------------------
+
 @app.post("/api/analyze_session")
 async def analyze_session_endpoint(
     file: UploadFile = File(...), 
@@ -256,73 +257,177 @@ async def analyze_session_endpoint(
         with open(temp_path, "wb") as buffer:
             buffer.write(await file.read())
 
-        if video_service is None: raise Exception("Video Service not initialized")
-
         # 1. Process Video
         result = await run_in_threadpool(video_service.process_session, temp_path)
+        print(f"✅ Final App Result: {result['dominant_emotion']} ({result['confidence']}%)")
+
+        #caluclate full percentages
+        counts = result.get("emotion_counts", {})
+        total_counts = sum(counts.values())
+
+        print(f"📊 RAW ANALYSIS RESULT: {result}")
+        percentages = {emo: (cnt / total_counts * 100, 2) for emo , cnt in counts.items()} if total_counts > 0 else {}
+
+        print("\n--- 🔍 PERCENTAGE EMOTION BREAKDOWN ---")
+        for emo, pct in sorted(percentages.items(), key=lambda x: x[1], reverse=True):
+            print(f"   {emo}: {pct}%")
+            print("---------------------------------\n")
+         
+        result["percentages"] = percentages
         
-        # 2. Extract & Filter Emotion
+        # 2. Extract Data
         emotion = result.get("dominant_emotion", "Neutral")
         confidence = float(result.get("confidence", 0.0))
+        # This is the "Raw List" from your VideoProcessor
+        raw_counts = result.get("emotion_counts", {}) 
 
-        if confidence < 0.35: # Using the updated 0.35 threshold
+        # --- DEBUG LOGGING ---
+        print("\n--- 🔍 RAW EMOTION BREAKDOWN ---")
+        # Sort counts to see the runner-up
+        sorted_emotions = sorted(raw_counts.items(), key=lambda x: x[1], reverse=True)
+        for emo, count in sorted_emotions:
+            print(f"   {emo}: {count} frames")
+        print(f"   Final Decision: {emotion} ({confidence}%)")
+        print("---------------------------------\n")
+
+        # 3. FIX: Adjusting the "Neutral Lock" logic
+        # If Neutral won, but the runner-up is very close, you might want to know.
+        if confidence < 15.0: 
             emotion = "Neutral"
-
-        # 3. SAVE TO RAW LOGS
+            
+        # 4. DATABASE SAVING (Corrected JSON logic)
         try:
-            new_session = models.MoodSession(
-                user_id="user_001",
-                emotion=emotion,
-                confidence=confidence,
-                timestamp=time.time()
-            )
-            db.add(new_session)
-            db.commit() # Save the log first
-            print(f"✅ Log Saved: {emotion}")
-
-            # 4. UPDATE DAILY SUMMARY (This populates the charts)
-            # We use an UPSERT strategy: Try to insert, if exists, update count.
             today_str = date.today().isoformat()
             
-            # Check if entry exists
+            # Save Raw Log
+            new_log = models.MoodSession(
+                user_id="user_001", emotion=emotion,
+                confidence=confidence, timestamp=time.time()
+            )
+            db.add(new_log)
+
+            # Update Daily Summary
             daily_entry = db.query(models.DailySummary).filter(
                 models.DailySummary.user_id == "user_001",
-                models.DailySummary.day == today_str,
-                models.DailySummary.emotion == emotion
+                models.DailySummary.date_str == today_str
             ).first()
 
             if daily_entry:
-                daily_entry.emotion_counts += 1
+                counts = json.loads(daily_entry.emotion_counts)
+                counts[emotion] = counts.get(emotion, 0) + 1
+                daily_entry.emotion_counts = json.dumps(counts)
             else:
-                new_daily = models.DailySummary(
-                    user_id="user_001",
-                    day=today_str,
-                    emotion=emotion,
-                    emotion_counts=1
+                daily_entry = models.DailySummary(
+                    user_id="user_001", date_str=today_str,
+                    emotion_counts=json.dumps({emotion: 1})
                 )
-                db.add(new_daily)
+                db.add(daily_entry)
             
-            db.commit() # Save the daily count
-            print(f"✅ Daily Stats Updated for {today_str}")
-
+            db.commit()
         except Exception as db_e:
             db.rollback()
-            print(f"❌ DB Save Failed: {db_e}")
+            print(f"❌ DB Error: {db_e}")
 
-        # 5. Update System State
-        system_state["latest_emotion"] = emotion
-        system_state["face_detected"] = result.get("face_detected", False)
-        
+        # 5. RETURN RAW LIST TO FRONTEND
+        # We add 'raw_breakdown' so your Flutter/React app can see the full list
+        result["raw_breakdown"] = raw_counts
         return result
 
     except Exception as e:
-        print(f"❌ Processing Error: {e}")
-        return {"dominant_emotion": "Neutral", "confidence": 0.0}
+        print(f"❌ Server Error: {e}")
+        return {"dominant_emotion": "Neutral", "confidence": 0.0, "raw_breakdown": {}}
     finally:
         if os.path.exists(temp_path):
-            try: os.remove(temp_path)
-            except: pass
+            os.remove(temp_path)
 
+
+# @app.post("/api/analyze_session")
+# async def analyze_session_endpoint(
+#     file: UploadFile = File(...), 
+#     db: Session = Depends(get_db)
+# ):
+#     temp_path = os.path.join(TEMP_DIR, f"temp_{int(time.time())}_{file.filename}")
+    
+#     try:
+#         with open(temp_path, "wb") as buffer:
+#             buffer.write(await file.read())
+
+#         if video_service is None: raise Exception("Video Service not initialized")
+
+#         # 1. Process Video
+#         # Note: video_service is your VideoProcessor instance
+#         result = await run_in_threadpool(video_service.process_session, temp_path)
+
+#         print(f"📊 RAW ANALYSIS RESULT: {result}")
+        
+#         # 2. Extract & Filter Emotion
+#         emotion = result.get("dominant_emotion", "Neutral")
+#         confidence = float(result.get("confidence", 0.0))
+        
+#         # --- FIX 1: ADJUST THRESHOLD TO PERCENTAGE ---
+#         # The processor returns 0-100. So we check against 35.0, not 0.35
+#         if confidence < 35.0: 
+#             print(f"⚠️ Low confidence ({confidence}%), defaulting to Neutral.")
+#             emotion = "Neutral"
+#             result["dominant_emotion"] = "Neutral"
+            
+#         # 3. SAVE TO RAW LOGS
+#         try:
+#             new_session = models.MoodSession(
+#                 user_id="user_001",
+#                 emotion=emotion,
+#                 confidence=confidence,
+#                 timestamp=time.time()
+#             )
+#             db.add(new_session)
+#             db.commit() # Save the log first
+#             print(f"✅ Log Saved: {emotion} ({confidence}%)")
+
+#             # 4. UPDATE DAILY SUMMARY (Upsert Logic)
+#             today_str = date.today().isoformat()
+            
+#             # Check if entry exists for this specific emotion today
+#             daily_entry = db.query(models.DailySummary).filter(
+#                 models.DailySummary.user_id == "user_001",
+#                 models.DailySummary.day == today_str,
+#                 models.DailySummary.emotion == emotion
+#             ).first()
+
+#             if daily_entry:
+#                 daily_entry.emotion_counts += 1
+#             else:
+#                 new_daily = models.DailySummary(
+#                     user_id="user_001",
+#                     day=today_str,
+#                     emotion=emotion,
+#                     emotion_counts=1
+#                 )
+#                 db.add(new_daily)
+            
+#             db.commit() # Save the daily count
+#             print(f"✅ Daily Stats Updated for {today_str}")
+
+#         except Exception as db_e:
+#             db.rollback()
+#             print(f"❌ DB Save Failed: {db_e}")
+
+#         # 5. Update System State
+#         system_state["latest_emotion"] = emotion
+        
+#         # --- FIX 2: DERIVE FACE DETECTED ---
+#         # If total_frames_analyzed > 0, we saw a face.
+#         frames_found = result.get("total_frames_analyzed", 0)
+#         system_state["face_detected"] = frames_found > 0
+        
+#         return result
+
+#     except Exception as e:
+#         print(f"❌ Processing Error: {e}")
+#         return {"dominant_emotion": "Neutral", "confidence": 0.0}
+#     finally:
+#         if os.path.exists(temp_path):
+#             try: os.remove(temp_path)
+#             except: pass
 
 
 def _is_new_user(user_id: str) -> bool:
@@ -336,8 +441,6 @@ def _is_new_user(user_id: str) -> bool:
         con.close()
     return row is None
 
-
-from fastapi.concurrency import run_in_threadpool
 
 @app.get("/api/recommendation/today")
 async def daily_recommendation(user_id: str = "user_001"):
