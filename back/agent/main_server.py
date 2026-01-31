@@ -49,7 +49,49 @@ class ChatMessage(BaseModel):
 # -----------------------------------------------------------------
 # HELPER FUNCTIONS
 # -----------------------------------------------------------------
+# -------------------------------------- i added these codes for fetching the latest emotions detected
+def _fetch_latest_emotion_from_db(user_id: str) -> dict:
+    """
+    Returns latest detected emotion from emotion_logs.
+    If none exists, returns {"emotion": None, "confidence": None, "timestamp": None}.
+    """
+    con = sqlite3.connect(DB_PATH)
+    try:
+        row = con.execute(
+            """
+            SELECT emotion, confidence, timestamp
+            FROM emotion_logs
+            WHERE user_id = ?
+            ORDER BY timestamp DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
 
+        if not row:
+            return {"emotion": None, "confidence": None, "timestamp": None}
+
+        emo, conf, ts = row
+        return {"emotion": emo, "confidence": conf, "timestamp": ts}
+    finally:
+        con.close()
+
+
+def _latest_emotion_display(user_id: str) -> dict:
+    """
+    UI-friendly payload.
+    If no emotion exists => "No emotion detected"
+    """
+    latest = _fetch_latest_emotion_from_db(user_id)
+    if not latest["emotion"]:
+        return {"emotion": "No emotion detected", "confidence": 0.0, "timestamp": None}
+
+    return {
+        "emotion": str(latest["emotion"]),
+        "confidence": float(latest["confidence"] or 0.0),
+        "timestamp": latest["timestamp"],
+    }
+#-------------------------------------------------------------------------
 
 def _get_last_7_days() -> list[str]:
     today = date.today()
@@ -210,6 +252,13 @@ def startup_event():
         print(f"✅ All systems go! Connected to DB at: {DB_PATH}")
     except Exception as e:
         print(f"❌ Startup Error: {e}")
+        
+#-----------------also added this new endpoint for the latest detected
+@app.get("/api/emotions/latest")
+async def latest_emotion(user_id: str = "user_001"):
+    """Latest detected emotion pulled from emotion_logs (for dashboard)."""
+    return _latest_emotion_display(user_id)
+
 
 @app.get("/api/emotions/weekly")
 async def weekly_emotions(user_id: str = "user_001"):
