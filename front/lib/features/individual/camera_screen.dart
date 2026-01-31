@@ -18,15 +18,12 @@ class _CameraScreenState extends State<CameraScreen> with AutomaticKeepAliveClie
   // STATE VARIABLES
   bool _isRecording = false; 
   bool _isAnalyzing = false; 
-  int _timeLeft = 10;
+  int _timeLeft = 5;
   Timer? _timer;
 
-  // 1. STATIC MEMORY (The Fix)
-  // By adding 'static', this list belongs to the App, not the Screen.
-  // It will survive when you switch tabs.
+  // STATIC MEMORY
   static List<Map<String, dynamic>> _recentSessions = [];
 
-  // 2. KEEP ALIVE (To prevent camera lag when switching)
   @override
   bool get wantKeepAlive => true;
 
@@ -37,7 +34,6 @@ class _CameraScreenState extends State<CameraScreen> with AutomaticKeepAliveClie
   }
 
   Future<void> _initializeCamera() async {
-    // Check if controller is already initialized to prevent lag
     if (_controller != null && _controller!.value.isInitialized) {
       if (mounted) setState(() => _isCameraInitialized = true);
       return;
@@ -93,7 +89,7 @@ class _CameraScreenState extends State<CameraScreen> with AutomaticKeepAliveClie
       
       setState(() {
         _isRecording = true;
-        _timeLeft = 10; 
+        _timeLeft = 5; 
       });
 
       _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
@@ -133,9 +129,8 @@ class _CameraScreenState extends State<CameraScreen> with AutomaticKeepAliveClie
       if (mounted) {
         setState(() {
           _isAnalyzing = false;
-          _timeLeft = 10; 
+          _timeLeft = 5; 
           
-          // Save to the static list
           _recentSessions.insert(0, {
             "label": emotion,
             "confidence": confidence,
@@ -168,13 +163,18 @@ class _CameraScreenState extends State<CameraScreen> with AutomaticKeepAliveClie
       case 'angry': return Colors.red;
       case 'surprised': return Colors.orange;
       case 'neutral': return Colors.blue;
+      case 'disgust': return Colors.brown;
+      case 'fear': return Colors.indigo;
       default: return Colors.purple;
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    super.build(context); // REQUIRED FOR MIXIN
+    super.build(context); 
+
+    // Define the height here for consistency
+    final double cameraHeight = 500; 
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -190,15 +190,17 @@ class _CameraScreenState extends State<CameraScreen> with AutomaticKeepAliveClie
             Expanded(
               child: SingleChildScrollView(
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 20.0),
+                  // Reduced padding to 10.0 to make the camera window wider
+                  padding: const EdgeInsets.symmetric(horizontal: 25.0),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const SizedBox(height: 20),
+                      const SizedBox(height: 5),
 
                       // --- LIVE CAMERA FEED ---
-                      AspectRatio(
-                        aspectRatio: 1.0,
+                      Container(
+                        height: cameraHeight, 
+                        width: double.infinity, 
                         child: Stack(
                           alignment: Alignment.center,
                           children: [
@@ -206,25 +208,39 @@ class _CameraScreenState extends State<CameraScreen> with AutomaticKeepAliveClie
                               decoration: BoxDecoration(
                                 borderRadius: BorderRadius.circular(20),
                                 border: Border.all(
-                                  color: _isRecording ? Colors.redAccent : AppColors.lighterblue, 
-                                  width: 4
+                                  color: _isRecording ? AppColors.textDark : AppColors.lighterblue, 
+                                  width: 3
                                 ),
                               ),
+                              // ClipRRect creates the rounded corners
                               child: ClipRRect(
                                 borderRadius: BorderRadius.circular(16),
-                                child: _isCameraInitialized
-                                    ? CameraPreview(_controller!)
-                                    : const Center(child: CircularProgressIndicator()),
+                                child: SizedBox(
+                                  width: double.infinity,
+                                  height: cameraHeight,
+                                  child: _isCameraInitialized
+                                      ? FittedBox(
+                                          fit: BoxFit.cover, // Ensures video fills the tall box
+                                          child: SizedBox(
+                                            // We swap width/height because phone cameras are often rotated 90 degrees
+                                            width: _controller!.value.previewSize!.height,
+                                            height: _controller!.value.previewSize!.width,
+                                            child: CameraPreview(_controller!),
+                                          ),
+                                        )
+                                      : const Center(child: CircularProgressIndicator()),
+                                ),
                               ),
                             ),
                             
+                            // Recording Overlay
                             if (_isRecording)
                               Positioned(
                                 bottom: 20,
                                 child: Container(
                                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                                   decoration: BoxDecoration(
-                                    color: Colors.redAccent.withOpacity(0.8),
+                                    color: AppColors.lighterblue.withOpacity(0.8),
                                     borderRadius: BorderRadius.circular(20),
                                   ),
                                   child: Text(
@@ -234,10 +250,13 @@ class _CameraScreenState extends State<CameraScreen> with AutomaticKeepAliveClie
                                 ),
                               ),
 
+                            // Analyzing Overlay
                             if (_isAnalyzing)
                               Container(
+                                width: double.infinity,
+                                height: cameraHeight,
                                 decoration: BoxDecoration(
-                                  color: Colors.black.withOpacity(0.7),
+                                  color: AppColors.textDark.withOpacity(0.2),
                                   borderRadius: BorderRadius.circular(20),
                                 ),
                                 child: const Center(
@@ -256,11 +275,13 @@ class _CameraScreenState extends State<CameraScreen> with AutomaticKeepAliveClie
                       ),
 
                       const SizedBox(height: 25),
-                      const Text("Session History", style: TextStyle(color: AppColors.lighterblue, fontSize: 16, fontWeight: FontWeight.w600)),
+                      const Text("Session History", style: TextStyle(color: AppColors.textDark, fontSize: 16, fontWeight: FontWeight.w600)),
                       const SizedBox(height: 15),
 
                       if (_recentSessions.isEmpty)
-                        const Padding(padding: EdgeInsets.all(20), child: Text("Start a session to track your mood."))
+                        const Padding(padding: EdgeInsets.all(20.0),
+                          child: Text("Start a session to track your mood.", style: TextStyle(color: AppColors.textDark, fontSize: 14, fontWeight: FontWeight.normal)),
+                        )
                       else
                         Column(
                           children: _recentSessions.map((d) => _buildSessionRow(d)).toList(),
@@ -273,7 +294,7 @@ class _CameraScreenState extends State<CameraScreen> with AutomaticKeepAliveClie
 
             // --- START BUTTON ---
             Padding(
-              padding: const EdgeInsets.only(top: 10, bottom: 30),
+              padding: const EdgeInsets.only(top: 9, bottom: 30),
               child: GestureDetector(
                 onTap: _isRecording ? null : _startSession, 
                 child: AnimatedContainer(
@@ -281,11 +302,11 @@ class _CameraScreenState extends State<CameraScreen> with AutomaticKeepAliveClie
                   height: 80,
                   width: 80,
                   decoration: BoxDecoration(
-                    color: _isRecording ? Colors.grey[300] : Colors.redAccent, 
+                    color: _isRecording ? Colors.grey[300] : AppColors.lighterblue, 
                     shape: BoxShape.circle,
                     boxShadow: [
                       if (!_isRecording)
-                        BoxShadow(color: Colors.redAccent.withOpacity(0.4), blurRadius: 15, offset: const Offset(0, 5))
+                        BoxShadow(color: AppColors.lighterblue.withOpacity(0.4), blurRadius: 15, offset: const Offset(0, 5))
                     ],
                   ),
                   child: Center(
@@ -301,7 +322,7 @@ class _CameraScreenState extends State<CameraScreen> with AutomaticKeepAliveClie
             if (!_isRecording && !_isAnalyzing)
               const Padding(
                 padding: EdgeInsets.only(bottom: 20),
-                child: Text("Tap to start 10s Session", style: TextStyle(color: AppColors.textDark)),
+                child: Text("Tap to start 5s Session", style: TextStyle(color: AppColors.textDark)),
               )
           ],
         ),
@@ -309,14 +330,14 @@ class _CameraScreenState extends State<CameraScreen> with AutomaticKeepAliveClie
     );
   }
 
-  Widget _buildSessionRow(Map<String, dynamic> data) {
-    return Container(
+  Widget _buildSessionRow(Map<String, dynamic> data) { 
+    return Container( 
       margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 5, offset: const Offset(0, 2))],
+        borderRadius: BorderRadius.circular(16), 
+        boxShadow: [BoxShadow(color: AppColors.textDark.withOpacity(0.12), blurRadius: 5, offset: const Offset(0, 2))], 
       ),
       child: Row(
         children: [
