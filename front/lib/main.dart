@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart'; // Uncommented this so Camera works
+import 'package:flutter_application_1/auth/signup/role_screen.dart';
+import 'package:flutter_application_1/role_gate.dart';
 
 // Imports
 import 'theme/app_colors.dart';
 import 'features/individual/navigation.dart'; 
 import 'user_role.dart'; 
-
+import 'auth/login_screen.dart';
+import 'auth/signup/role_screen.dart';
 // 1. Global Camera Variable
 // We need this to pass the camera list to the CameraScreen later
 List<CameraDescription> cameras = []; 
@@ -37,9 +40,8 @@ class MyApp extends StatelessWidget {
         useMaterial3: true,
       ),
       
-      // --- THE FIX IS HERE ---
-      // We set this to 'individual' so the Camera Icon appears.
-      home: const MainScaffold(userRole: UserRole.individual),
+      
+      home: RoleGate()
     );
   }
 }

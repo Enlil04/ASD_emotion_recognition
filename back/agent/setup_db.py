@@ -290,6 +290,28 @@ def setup_tables():
         updated_at REAL
     )""")
 
+    # After CREATE TABLE IF NOT EXISTS users (...)
+    cur.execute("PRAGMA table_info(users)")
+    existing_cols = {row[1] for row in cur.fetchall()}
+
+    def add_col(sql):
+        try:
+            cur.execute(sql)
+        except Exception as e:
+            print("⚠️ Column add skipped:", e)
+
+    if "email" not in existing_cols:
+        add_col("ALTER TABLE users ADD COLUMN email TEXT")
+
+    if "password_hash" not in existing_cols:
+        add_col("ALTER TABLE users ADD COLUMN password_hash TEXT")
+
+    if "is_active" not in existing_cols:
+        add_col("ALTER TABLE users ADD COLUMN is_active INTEGER DEFAULT 1")
+
+    # Enforce uniqueness for email via index (SQLite-friendly)
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+
     # ... (Rest of the tables remain the same) ...
     
     # 2. COMMUNITY POSTS

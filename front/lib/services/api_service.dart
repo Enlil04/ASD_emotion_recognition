@@ -1,10 +1,153 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart'; 
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
 
 class ApiService {
   
-  static const String baseUrl = 'http://192.168.0.106:8000';
+  static const String baseUrl = 'http://10.38.171.50:8000';
+  static const _storage = FlutterSecureStorage();
+
+//------------------------ register here ---------------------------------
+  static Future<Map<String, dynamic>> register({
+  required String email,
+  required String password,
+  required String role, // "therapist" | "parent" | "user"
+  String? username,
+  String? name,
+  String? dob,
+  Map<String, dynamic>? extra,
+}) async {
+  final url = Uri.parse('$baseUrl/auth/register');
+
+  final res = await http.post(
+    url,
+    headers: {"Content-Type": "application/json"},
+    body: jsonEncode({
+      "email": email.trim(),
+      "password": password,
+      "role": role.toLowerCase().trim(),
+      "username": username?.trim(),
+      "name": name?.trim(),
+      "dob": dob,               // "YYYY-MM-DD"
+      "extra": extra ?? {},     // role-specific fields
+    }),
+  ).timeout(const Duration(seconds: 30));
+
+  if (res.statusCode == 200) {
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+  throw Exception("Register failed: ${res.statusCode} ${res.body}");
+}
+//------------------------------------------------------------------------------
+
+
+//--------------------------------login helpers and methods here --------------------------------------
+
+static Future<void> saveSession({
+  required String token,
+  required String role,
+  required String userId,
+}) async {
+  await _storage.write(key: "access_token", value: token);
+  await _storage.write(key: "role", value: role);
+  await _storage.write(key: "user_id", value: userId);
+}
+
+static Future<String?> getToken() => _storage.read(key: "access_token");
+static Future<String?> getRole() => _storage.read(key: "role");
+static Future<String?> getUserId() => _storage.read(key: "user_id");
+
+static Future<void> logout() async {
+  await _storage.delete(key: "access_token");
+  await _storage.delete(key: "role");
+  await _storage.delete(key: "user_id");
+}
+
+static Future<Map<String, String>> authHeaders() async {
+  final token = await getToken();
+  return {
+    "Content-Type": "application/json",
+    if (token != null) "Authorization": "Bearer $token",
+  };
+}
+
+static Future<Map<String, dynamic>> login({
+  required String email,
+  required String password,
+}) async {
+  final url = Uri.parse('$baseUrl/auth/login');
+
+  final res = await http.post(
+    url,
+    headers: {"Content-Type": "application/json"},
+    body: jsonEncode({
+      "email": email.trim(),
+      "password": password,
+    }),
+  ).timeout(const Duration(seconds: 30));
+
+  if (res.statusCode != 200) {
+    throw Exception("Login failed: ${res.statusCode} ${res.body}");
+  }
+
+  final data = jsonDecode(res.body) as Map<String, dynamic>;
+
+  await saveSession(
+    token: data["access_token"],
+    role: data["role"],
+    userId: data["user_id"],
+  );
+
+  return data;
+}
+
+//-------------------------------------------------------------------------------------------------------
+
+
+// -------------------- PROFILE (new) --------------------
+
+static Future<Map<String, dynamic>> fetchProfileStats(String userId) async {
+  final token = await getToken();
+  final url = Uri.parse('$baseUrl/api/profile/stats?user_id=$userId');
+
+  final res = await http.get(
+    url,
+    headers: {
+      "Content-Type": "application/json",
+      if (token != null) "Authorization": "Bearer $token",
+    },
+  ).timeout(const Duration(seconds: 15));
+
+  if (res.statusCode == 200) {
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+  throw Exception("Failed to load profile stats: ${res.statusCode} ${res.body}");
+}
+
+static Future<List<dynamic>> fetchProfileActivity(String userId,
+    {int limit = 10, int offset = 0}) async {
+  final token = await getToken();
+  final url = Uri.parse(
+    '$baseUrl/api/profile/activity?user_id=$userId&limit=$limit&offset=$offset',
+  );
+
+  final res = await http.get(
+    url,
+    headers: {
+      "Content-Type": "application/json",
+      if (token != null) "Authorization": "Bearer $token",
+    },
+  ).timeout(const Duration(seconds: 15));
+
+  if (res.statusCode == 200) {
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    return (data["items"] as List<dynamic>? ?? []);
+  }
+  throw Exception("Failed to load activity: ${res.statusCode} ${res.body}");
+}
+//-------------------------------------------------------------------------
 
   static Future<String> sendMessage(String message) async {
     try {
@@ -17,7 +160,7 @@ class ApiService {
           "user_id": "user_001", 
           "message": message
         }),
-      ).timeout(const Duration(seconds: 15)); 
+      ).timeout(const Duration(seconds: 180)); 
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);

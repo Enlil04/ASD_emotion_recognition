@@ -1,3 +1,4 @@
+
 # import cv2
 # import numpy as np
 # from collections import Counter
@@ -110,7 +111,7 @@ class VideoProcessor:
             # 🔥 CRITICAL FIX: disable smoothing for video
             emotion, conf, _, _ = self.detector.predict(
                 frame,
-                smooth=False
+                smooth=True
             )
 
             if emotion is not None:

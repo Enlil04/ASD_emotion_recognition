@@ -10,6 +10,10 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+#for signup
+from services.auth import router as auth_router
+
+
 # --- 1. IMPORT PATHS & DB FROM SETUP_DB (Source of Truth) ---
 # We import DB_PATH and DATA_DIR so we don't accidentally create a second file
 from setup_db import Base, engine, get_db, DB_PATH, DATA_DIR
@@ -38,6 +42,8 @@ system_state = {
 }
 
 app = FastAPI()
+app.include_router(auth_router)
+
 brain = None
 # detector = None
 # video_service = None
@@ -1134,7 +1140,282 @@ async def delete_post(post_id: int, requester_user_id: str):
         con.close()
 
 
+# ==============================
+# PROFILE ACTIVITY + STATS (new)
+# ==============================
 
+def _activity_item(ts: float, kind: str, title: str, subtitle: str = "", meta: dict | None = None) -> dict:
+    return {
+        "timestamp": float(ts),
+        "type": kind,              # e.g. "emotion", "post", "comment", "like"
+        "title": title,            # UI title
+        "subtitle": subtitle,      # UI subtitle
+        "meta": meta or {},        # optional extra fields
+    }
+
+
+@app.get("/api/profile/activity")
+async def profile_activity(
+    user_id: str = "user_001",
+    limit: int = Query(10, ge=1, le=50),
+    offset: int = Query(0, ge=0),
+):
+    """
+    Recent activity feed for Profile screen.
+    Merges:
+      - emotion logs (emotion_logs)
+      - community posts (community_posts)
+      - comments (comments)
+      - likes (post_likes)
+    Returns newest-first, paged via limit/offset.
+    """
+    con = _connect_db_row()
+    try:
+        cur = con.cursor()
+
+        items: list[dict] = []
+
+        # 1) Emotion check-ins
+        emo_rows = cur.execute(
+            """
+            SELECT emotion, confidence, timestamp
+            FROM emotion_logs
+            WHERE user_id = ?
+            ORDER BY timestamp DESC
+            LIMIT 50
+            """,
+            (user_id,),
+        ).fetchall()
+
+        for r in emo_rows:
+            emotion = (r["emotion"] or "Neutral")
+            conf = float(r["confidence"] or 0.0)
+            ts = float(r["timestamp"] or 0.0)
+            items.append(_activity_item(
+                ts=ts,
+                kind="emotion",
+                title=f"Emotion check-in: {emotion}",
+                subtitle=f"Confidence: {conf:.0f}%",
+                meta={"emotion": emotion, "confidence": conf},
+            ))
+
+        # 2) Community posts by this user
+        post_rows = cur.execute(
+            """
+            SELECT id, content, date_created
+            FROM community_posts
+            WHERE user_id = ? AND COALESCE(is_deleted, 0) = 0
+            ORDER BY date_created DESC
+            LIMIT 50
+            """,
+            (user_id,),
+        ).fetchall()
+
+        for r in post_rows:
+            ts = float(r["date_created"] or 0.0)
+            content = (r["content"] or "").strip()
+            preview = content[:60] + ("…" if len(content) > 60 else "")
+            items.append(_activity_item(
+                ts=ts,
+                kind="post",
+                title="Posted in Community",
+                subtitle=preview,
+                meta={"post_id": int(r["id"])},
+            ))
+
+        # 3) Comments by this user
+        comment_rows = cur.execute(
+            """
+            SELECT id, post_id, content, date_created
+            FROM comments
+            WHERE user_id = ?
+            ORDER BY date_created DESC
+            LIMIT 50
+            """,
+            (user_id,),
+        ).fetchall()
+
+        for r in comment_rows:
+            ts = float(r["date_created"] or 0.0)
+            content = (r["content"] or "").strip()
+            preview = content[:60] + ("…" if len(content) > 60 else "")
+            items.append(_activity_item(
+                ts=ts,
+                kind="comment",
+                title="Commented on a post",
+                subtitle=preview,
+                meta={"comment_id": int(r["id"]), "post_id": int(r["post_id"])},
+            ))
+
+        # 4) Likes by this user
+        like_rows = cur.execute(
+            """
+            SELECT post_id, date_created
+            FROM post_likes
+            WHERE user_id = ?
+            ORDER BY date_created DESC
+            LIMIT 50
+            """,
+            (user_id,),
+        ).fetchall()
+
+        for r in like_rows:
+            ts = float(r["date_created"] or 0.0)
+            items.append(_activity_item(
+                ts=ts,
+                kind="like",
+                title="Liked a post",
+                subtitle="",
+                meta={"post_id": int(r["post_id"])},
+            ))
+
+        # Merge + sort newest first
+        items.sort(key=lambda x: x["timestamp"], reverse=True)
+
+        # Apply paging after merge
+        sliced = items[offset: offset + limit]
+
+        return {
+            "user_id": user_id,
+            "limit": limit,
+            "offset": offset,
+            "items": sliced,
+        }
+    finally:
+        con.close()
+
+
+@app.get("/api/profile/stats")
+async def profile_stats(user_id: str = "user_001"):
+    """
+    Profile stats including total 'activities' count (for the Profile stats row).
+    Pulls streak/connections from users table if present.
+    """
+    con = _connect_db_row()
+    try:
+        cur = con.cursor()
+
+        # user fields
+        u = cur.execute(
+            """
+            SELECT streak, connections
+            FROM users
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+
+        streak = int((u["streak"] if u else 0) or 0)
+        connections = int((u["connections"] if u else 0) or 0)
+
+        # activity counts
+        emo_count = cur.execute(
+            "SELECT COUNT(*) as c FROM emotion_logs WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()["c"]
+
+        post_count = cur.execute(
+            "SELECT COUNT(*) as c FROM community_posts WHERE user_id = ? AND COALESCE(is_deleted,0)=0",
+            (user_id,),
+        ).fetchone()["c"]
+
+        comment_count = cur.execute(
+            "SELECT COUNT(*) as c FROM comments WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()["c"]
+
+        like_count = cur.execute(
+            "SELECT COUNT(*) as c FROM post_likes WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()["c"]
+
+        activities = int(emo_count or 0) + int(post_count or 0) + int(comment_count or 0) + int(like_count or 0)
+
+        return {
+            "user_id": user_id,
+            "streak": streak,
+            "connections": connections,
+            "activities": activities,
+            "breakdown": {
+                "emotion_logs": int(emo_count or 0),
+                "posts": int(post_count or 0),
+                "comments": int(comment_count or 0),
+                "likes": int(like_count or 0),
+            }
+        }
+    finally:
+        con.close()
+#-------------------------------------------------------------------------
+
+#================================= takes image not photo ==============================
+@app.post("/api/analyze_image")
+async def analyze_image_endpoint(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    try:
+        # --- read image bytes ---
+        contents = await file.read()
+        np_img = np.frombuffer(contents, np.uint8)
+        frame = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
+
+        if frame is None:
+            raise ValueError("Invalid image")
+
+        # --- run detector ONCE (no video logic) ---
+        emotion, conf, box, probs = detector.predict(frame, smooth=False)
+
+        if emotion is None:
+            emotion = "Neutral"
+            conf = 0.0
+
+        confidence_percent = round(float(conf * 100), 2)
+
+        # --- save to DB (same pattern as video) ---
+        today_str = date.today().isoformat()
+
+        new_log = models.MoodSession(
+            user_id="user_001",
+            emotion=emotion,
+            confidence=confidence_percent,
+            timestamp=time.time(),
+        )
+        db.add(new_log)
+
+        daily_entry = db.query(models.DailySummary).filter(
+            models.DailySummary.user_id == "user_001",
+            models.DailySummary.date_str == today_str
+        ).first()
+
+        if daily_entry:
+            counts = json.loads(daily_entry.emotion_counts)
+            counts[emotion] = counts.get(emotion, 0) + 1
+            daily_entry.emotion_counts = json.dumps(counts)
+        else:
+            daily_entry = models.DailySummary(
+                user_id="user_001",
+                date_str=today_str,
+                emotion_counts=json.dumps({emotion: 1}),
+            )
+            db.add(daily_entry)
+
+        db.commit()
+
+        return {
+            "mode": "image",
+            "emotion": emotion,
+            "confidence": confidence_percent,
+        }
+
+    except Exception as e:
+        print("❌ Image analyze error:", e)
+        return {
+            "mode": "image",
+            "emotion": "Neutral",
+            "confidence": 0.0,
+        }
+        
+#=====================================================================================
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
