@@ -3,6 +3,8 @@ import 'package:flutter_application_1/services/api_service.dart';
 import '../../theme/app_colors.dart';
 import 'dashboard.dart';
 import '../../role_gate.dart';
+import 'package:flutter/services.dart';
+
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -23,6 +25,219 @@ class _ProfileScreenState extends State<ProfileScreen> {
     super.initState();
     _refreshAll();
   }
+//// call services that connect therpaist with users=========================
+  void _openConnectionSheet() async {
+  final role = (await ApiService.getRole() ?? "user").toLowerCase();
+  final userId = await ApiService.getUserId();
+
+  if (!mounted) return;
+
+  if (userId == null || userId.isEmpty) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text("No session found. Please login again.")),
+    );
+    return;
+  }
+
+  showModalBottomSheet(
+    context: context,
+    isScrollControlled: true,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+    ),
+    builder: (ctx) {
+      final codeController = TextEditingController();
+      bool loading = false;
+      String? myCode;
+
+      Future<void> loadMyCode(StateSetter setModalState) async {
+        try {
+          setModalState(() => loading = true);
+          final code = await ApiService.fetchMyTherapistCode(userId);
+          setModalState(() {
+            myCode = code;
+            loading = false;
+          });
+        } catch (e) {
+          setModalState(() => loading = false);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text("Failed to load code: $e")),
+            );
+          }
+        }
+      }
+
+      Future<void> regenerate(StateSetter setModalState) async {
+        try {
+          setModalState(() => loading = true);
+          final code = await ApiService.regenerateTherapistCode(userId);
+          setModalState(() {
+            myCode = code;
+            loading = false;
+          });
+        } catch (e) {
+          setModalState(() => loading = false);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text("Failed to regenerate code: $e")),
+            );
+          }
+        }
+      }
+
+      Future<void> connect(StateSetter setModalState) async {
+        final code = codeController.text.trim();
+        if (code.isEmpty) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Please enter a code.")),
+          );
+          return;
+        }
+
+        try {
+          setModalState(() => loading = true);
+          await ApiService.connectWithCode(patientId: userId, code: code);
+          setModalState(() => loading = false);
+
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text("Connected successfully ✅")),
+            );
+          }
+          Navigator.of(ctx).pop();
+          _refreshAll();
+        } catch (e) {
+          setModalState(() => loading = false);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text("Connect failed: $e")),
+            );
+          }
+        }
+      }
+
+      return StatefulBuilder(
+        builder: (context, setModalState) {
+          final isGuardian = role == "therapist" || role == "parent";
+
+          // Lazy-load code when opening for guardian roles
+          if (isGuardian && myCode == null && !loading) {
+            loadMyCode(setModalState);
+          }
+
+          return Padding(
+            padding: EdgeInsets.only(
+              left: 16,
+              right: 16,
+              top: 16,
+              bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  isGuardian ? "Your Connection Code" : "Connect to Therapist/Parent",
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.textDark,
+                  ),
+                ),
+                const SizedBox(height: 10),
+
+                if (loading)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 18),
+                    child: Center(child: CircularProgressIndicator()),
+                  )
+                else if (isGuardian) ...[
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: AppColors.blue.withOpacity(0.25),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      myCode ?? "—",
+                      style: const TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 2,
+                        color: AppColors.textDark,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          onPressed: (myCode == null || myCode!.isEmpty)
+                              ? null
+                              : () async {
+                                  await Clipboard.setData(ClipboardData(text: myCode!));
+                                  if (mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(content: Text("Code copied ✅")),
+                                    );
+                                  }
+                                },
+                          icon: const Icon(Icons.copy),
+                          label: const Text("Copy"),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: () => regenerate(setModalState),
+                          icon: const Icon(Icons.refresh),
+                          label: const Text("Regenerate"),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    "Share this code with your user to connect. (QR can replace this later.)",
+                    style: TextStyle(color: AppColors.textDark, fontSize: 12),
+                  ),
+                ] else ...[
+                  TextField(
+                    controller: codeController,
+                    textCapitalization: TextCapitalization.characters,
+                    decoration: InputDecoration(
+                      hintText: "Enter code (e.g. G-7K3F9A)",
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: () => connect(setModalState),
+                      child: const Text("Connect"),
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    "Ask your therapist/parent for their code.",
+                    style: TextStyle(color: AppColors.textDark, fontSize: 12),
+                  ),
+                ],
+              ],
+            ),
+          );
+        },
+      );
+    },
+  );
+}
+//========================================================
 
   void _refreshAll() {
     _profileFuture = _loadProfile();
@@ -177,21 +392,32 @@ class _ProfileScreenState extends State<ProfileScreen> {
               onTap: () {},
             ),
             ListTile(
-              leading: const Icon(Icons.dashboard),
-              title: const Text('Dashboard'),
-              onTap: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => const DashboardInsightsScreen(),
-                  ),
-                );
-              },
-            ),
+                leading: const Icon(Icons.dashboard),
+                title: const Text('Dashboard'),
+                onTap: () async {
+                  Navigator.of(context).pop(); // close drawer
+
+                  final userId = await ApiService.getUserId();
+                  if (userId == null || userId.isEmpty) return;
+
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => DashboardInsightsScreen(
+                        userId: userId,
+                      ),
+                    ),
+                  );
+                },
+              ),
+
             ListTile(
-              leading: const Icon(Icons.help),
-              title: const Text('Help & Support'),
-              onTap: () {},
+              leading: const Icon(Icons.link),
+              title: const Text('Connection'),
+              onTap: () {
+              Navigator.of(context).pop(); // close drawer
+              _openConnectionSheet();
+            },
             ),
             ListTile(
               leading: const Icon(Icons.logout),

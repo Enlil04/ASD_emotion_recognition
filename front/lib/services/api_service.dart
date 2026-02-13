@@ -6,7 +6,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 class ApiService {
   
-  static const String baseUrl = 'http://10.38.171.50:8000';
+  static const String baseUrl = 'http://10.242.197.50:8000';
   static const _storage = FlutterSecureStorage();
 
 //------------------------ register here ---------------------------------
@@ -172,6 +172,8 @@ static Future<List<dynamic>> fetchProfileActivity(String userId,
       return "Nimi is offline. Check your server connection.";
     }
   }
+
+
 
   static Future<Map<String, dynamic>> analyzeSession(String videoPath) async {
     try {
@@ -441,6 +443,71 @@ static Future<List<dynamic>> fetchProfileActivity(String userId,
     }
   }
 
+  // ==============================
+// THERAPIST/PARENT <-> USER LINKING
+// ==============================
+
+static Future<String> fetchMyTherapistCode(String userId) async {
+  final url = Uri.parse("$baseUrl/api/therapist/my_code?user_id=$userId");
+  final response = await http.get(url);
+
+  if (response.statusCode == 200) {
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    return (data["code"] ?? "").toString();
+  } else {
+    throw Exception("Fetch code failed: ${response.statusCode} ${response.body}");
+  }
+}
+
+static Future<String> regenerateTherapistCode(String userId) async {
+  final url = Uri.parse("$baseUrl/api/therapist/regenerate_code");
+  final response = await http.post(
+    url,
+    headers: {"Content-Type": "application/json"},
+    body: jsonEncode({"user_id": userId}),
+  );
+
+  if (response.statusCode == 200) {
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    return (data["code"] ?? "").toString();
+  } else {
+    throw Exception("Regenerate code failed: ${response.statusCode} ${response.body}");
+  }
+}
+
+static Future<void> connectWithCode({
+  required String patientId,
+  required String code,
+}) async {
+  final url = Uri.parse("$baseUrl/api/therapist/connect");
+  final response = await http.post(
+    url,
+    headers: {"Content-Type": "application/json"},
+    body: jsonEncode({
+      "patient_id": patientId,
+      "code": code,
+    }),
+  );
+
+  if (response.statusCode == 200) {
+    return;
+  } else {
+    throw Exception("Connect failed: ${response.statusCode} ${response.body}");
+  }
+}
+
+// Optional for later (therapist screen)
+static Future<List<dynamic>> fetchMyPatients(String therapistId) async {
+  final url = Uri.parse("$baseUrl/api/therapist/$therapistId/patients");
+  final response = await http.get(url);
+
+  if (response.statusCode == 200) {
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    return (data["items"] as List<dynamic>? ?? []);
+  } else {
+    throw Exception("Fetch patients failed: ${response.statusCode} ${response.body}");
+  }
+}
 
 
 }

@@ -298,7 +298,7 @@ def setup_tables():
         try:
             cur.execute(sql)
         except Exception as e:
-            print("⚠️ Column add skipped:", e)
+            print("Column add skipped:", e)
 
     if "email" not in existing_cols:
         add_col("ALTER TABLE users ADD COLUMN email TEXT")
@@ -308,8 +308,16 @@ def setup_tables():
 
     if "is_active" not in existing_cols:
         add_col("ALTER TABLE users ADD COLUMN is_active INTEGER DEFAULT 1")
+        
+    # -----------Add guardian/therapist code column----------
+    if "therapist_code" not in existing_cols:
+        add_col("ALTER TABLE users ADD COLUMN therapist_code TEXT")
 
-    # Enforce uniqueness for email via index (SQLite-friendly)
+    # Enforce uniqueness for therapist_code via index 
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_therapist_code ON users(therapist_code)")
+
+
+    # Enforce uniqueness for email via index 
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)")
 
     # ... (Rest of the tables remain the same) ...
@@ -408,6 +416,19 @@ def setup_tables():
         preferences_json TEXT
     )""")
 
+
+    # 11.--------- THERAPIST-PATIENT RELATION (guardian <-> patient)-------
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS therapist_patient (
+        therapist_id TEXT NOT NULL,
+        patient_id TEXT NOT NULL,
+        date_assigned REAL,
+        PRIMARY KEY (therapist_id, patient_id)
+    )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_tp_therapist ON therapist_patient(therapist_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_tp_patient ON therapist_patient(patient_id)")
+    #---------------------------------------------------------------------
     con.commit()
     con.close()
 

@@ -13,6 +13,10 @@ from sqlalchemy.orm import Session
 #for signup
 from services.auth import router as auth_router
 
+#for code generation from therapist side
+import random
+import string
+
 
 # --- 1. IMPORT PATHS & DB FROM SETUP_DB (Source of Truth) ---
 # We import DB_PATH and DATA_DIR so we don't accidentally create a second file
@@ -99,12 +103,20 @@ def _latest_emotion_display(user_id: str) -> dict:
     }
 #-------------------------------------------------------------------------
 
+
+# ----------------- generate therapist code ---------------------------
+def _generate_guardian_code() -> str:
+    # Example: G-7K3F9A (short, readable)
+    chars = string.ascii_uppercase + string.digits
+    return "G-" + "".join(random.choice(chars) for _ in range(6))
+
+#-----------------------------------------------------------------------
+
 def _get_last_7_days() -> list[str]:
     today = date.today()
     return [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in reversed(range(7))]
 
-import json
-import sqlite3
+
 
 def _fetch_emotion_totals_last_7_days(user_id: str) -> dict:
     """
@@ -261,15 +273,36 @@ def startup_event():
         
 #-----------------also added this new endpoint for the latest detected
 @app.get("/api/emotions/latest")
-async def latest_emotion(user_id: str = "user_001"):
+async def latest_emotion(user_id: str, requester_id: str = None):
     """Latest detected emotion pulled from emotion_logs (for dashboard)."""
-    return _latest_emotion_display(user_id)
+    con = _connect_db_row()
+    try:
+        cur = con.cursor()
+
+        if requester_id and requester_id != user_id:
+            if not _guardian_can_access_patient(cur, requester_id, user_id):
+                raise HTTPException(status_code=403, detail="Not allowed")
+
+        return _latest_emotion_display(user_id)
+    finally:
+        con.close()
 
 
 @app.get("/api/emotions/weekly")
-async def weekly_emotions(user_id: str = "user_001"):
+async def weekly_emotions(user_id: str, requester_id: str = None):
     """Weekly mood series (last 7 days) used by dashboard.dart."""
-    return _fetch_emotion_daily(user_id)
+    con = _connect_db_row()
+    try:
+        cur = con.cursor()
+
+        if requester_id and requester_id != user_id:
+            if not _guardian_can_access_patient(cur, requester_id, user_id):
+                raise HTTPException(status_code=403, detail="Not allowed")
+
+        return _fetch_emotion_daily(user_id)
+    finally:
+        con.close()
+
 
 @app.post("/chat")
 async def chat_endpoint(chat: ChatMessage):
@@ -627,6 +660,15 @@ class LikeRequest(BaseModel):
 class ReportRequest(BaseModel):
     reporter_user_id: str
     reason: str
+    
+#========================= new ============================
+class RegenerateCodeRequest(BaseModel):
+    user_id: str
+
+class ConnectRequest(BaseModel):
+    patient_id: str
+    code: str
+#=============================================================
 
 
 def _dict_user_public(row: sqlite3.Row) -> dict:
@@ -695,6 +737,19 @@ def _connect_db_row() -> sqlite3.Connection:
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
     return con
+
+# guardian (therapist or parent) can only view linked patients 
+def _guardian_can_access_patient(cur: sqlite3.Cursor, guardian_id: str, patient_id: str) -> bool:
+    row = cur.execute(
+        """
+        SELECT 1
+        FROM therapist_patient
+        WHERE therapist_id = ? AND patient_id = ?
+        LIMIT 1
+        """,
+        (guardian_id, patient_id),
+    ).fetchone()
+    return row is not None
 
 
 # --------------------------------------------------------------------
@@ -1140,6 +1195,185 @@ async def delete_post(post_id: int, requester_user_id: str):
         con.close()
 
 
+
+
+#======================================================
+#connect therapist and users endpoints
+#======================================================
+
+#1. get therapist code 
+@app.get("/api/therapist/my_code")
+async def therapist_my_code(user_id: str):
+    con = _connect_db_row()
+    try:
+        cur = con.cursor()
+
+        u = cur.execute(
+            "SELECT user_id, role, therapist_code FROM users WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+
+        if not u:
+            raise HTTPException(status_code=404, detail="user not found")
+
+        role = (u["role"] or "").lower()
+        if role not in ("therapist", "parent"):
+            raise HTTPException(status_code=403, detail="only therapist/parent can have a code")
+
+        code = u["therapist_code"]
+        if code:
+            return {"user_id": user_id, "code": code}
+
+        # generate unique code + save
+        for _ in range(10):
+            new_code = _generate_guardian_code()
+            try:
+                cur.execute(
+                    "UPDATE users SET therapist_code = ? WHERE user_id = ?",
+                    (new_code, user_id),
+                )
+                con.commit()
+                return {"user_id": user_id, "code": new_code}
+            except Exception:
+                # possible rare collision, retry
+                continue
+
+        raise HTTPException(status_code=500, detail="could not generate unique code")
+
+    finally:
+        con.close()
+
+
+# 2. regenerate code 
+@app.post("/api/therapist/regenerate_code")
+async def therapist_regenerate_code(req: RegenerateCodeRequest):
+    con = _connect_db_row()
+    try:
+        cur = con.cursor()
+
+        u = cur.execute(
+            "SELECT user_id, role FROM users WHERE user_id = ?",
+            (req.user_id,),
+        ).fetchone()
+
+        if not u:
+            raise HTTPException(status_code=404, detail="user not found")
+
+        role = (u["role"] or "").lower()
+        if role not in ("therapist", "parent"):
+            raise HTTPException(status_code=403, detail="only therapist/parent can regenerate code")
+
+        for _ in range(10):
+            new_code = _generate_guardian_code()
+            try:
+                cur.execute(
+                    "UPDATE users SET therapist_code = ? WHERE user_id = ?",
+                    (new_code, req.user_id),
+                )
+                con.commit()
+                return {"user_id": req.user_id, "code": new_code}
+            except Exception:
+                continue
+
+        raise HTTPException(status_code=500, detail="could not generate unique code")
+
+    finally:
+        con.close()
+
+
+#3. patients connect using that code 
+@app.post("/api/therapist/connect")
+async def connect_patient(req: ConnectRequest):
+    con = _connect_db_row()
+    now = time.time()
+    try:
+        cur = con.cursor()
+
+        # validate patient exists and is role=user
+        p = cur.execute(
+            "SELECT user_id, role FROM users WHERE user_id = ?",
+            (req.patient_id,),
+        ).fetchone()
+
+        if not p or (p["role"] or "").lower() != "user":
+            raise HTTPException(status_code=400, detail="invalid patient")
+
+        # normalize code (support lowercase input)
+        code = (req.code or "").strip().upper()
+
+        # find guardian by code
+        g = cur.execute(
+            "SELECT user_id, role FROM users WHERE therapist_code = ?",
+            (code,),
+        ).fetchone()
+
+        if not g:
+            raise HTTPException(status_code=404, detail="invalid code")
+
+        g_role = (g["role"] or "").lower()
+        if g_role not in ("therapist", "parent"):
+            raise HTTPException(status_code=400, detail="code does not belong to guardian")
+
+        guardian_id = g["user_id"]
+
+        # insert relation (idempotent)
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO therapist_patient(therapist_id, patient_id, date_assigned)
+            VALUES (?, ?, ?)
+            """,
+            (guardian_id, req.patient_id, now),
+        )
+        con.commit()
+
+        return {"ok": True, "therapist_id": guardian_id, "patient_id": req.patient_id}
+
+    finally:
+        con.close()
+
+# 4. therapist (or parent) list their patients (or childern)
+@app.get("/api/therapist/{therapist_id}/patients")
+async def get_guardian_patients(therapist_id: str):
+    con = _connect_db_row()
+    try:
+        cur = con.cursor()
+
+        # validate guardian role
+        g = cur.execute(
+            "SELECT role FROM users WHERE user_id = ?",
+            (therapist_id,),
+        ).fetchone()
+
+        if not g or (g["role"] or "").lower() not in ("therapist", "parent"):
+            raise HTTPException(status_code=403, detail="not allowed")
+
+        rows = cur.execute(
+            """
+            SELECT u.user_id, u.name, u.username, u.age, u.photo
+            FROM therapist_patient tp
+            JOIN users u ON u.user_id = tp.patient_id
+            WHERE tp.therapist_id = ?
+            ORDER BY tp.date_assigned DESC
+            """,
+            (therapist_id,),
+        ).fetchall()
+
+        return {
+            "items": [
+                {
+                    "user_id": r["user_id"],
+                    "name": r["name"],
+                    "username": r["username"],
+                    "age": r["age"],
+                    "photo": r["photo"],
+                }
+                for r in rows
+            ]
+        }
+
+    finally:
+        con.close()
+
 # ==============================
 # PROFILE ACTIVITY + STATS (new)
 # ==============================
@@ -1347,75 +1581,7 @@ async def profile_stats(user_id: str = "user_001"):
         con.close()
 #-------------------------------------------------------------------------
 
-#================================= takes image not photo ==============================
-@app.post("/api/analyze_image")
-async def analyze_image_endpoint(
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db)
-):
-    try:
-        # --- read image bytes ---
-        contents = await file.read()
-        np_img = np.frombuffer(contents, np.uint8)
-        frame = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
 
-        if frame is None:
-            raise ValueError("Invalid image")
-
-        # --- run detector ONCE (no video logic) ---
-        emotion, conf, box, probs = detector.predict(frame, smooth=False)
-
-        if emotion is None:
-            emotion = "Neutral"
-            conf = 0.0
-
-        confidence_percent = round(float(conf * 100), 2)
-
-        # --- save to DB (same pattern as video) ---
-        today_str = date.today().isoformat()
-
-        new_log = models.MoodSession(
-            user_id="user_001",
-            emotion=emotion,
-            confidence=confidence_percent,
-            timestamp=time.time(),
-        )
-        db.add(new_log)
-
-        daily_entry = db.query(models.DailySummary).filter(
-            models.DailySummary.user_id == "user_001",
-            models.DailySummary.date_str == today_str
-        ).first()
-
-        if daily_entry:
-            counts = json.loads(daily_entry.emotion_counts)
-            counts[emotion] = counts.get(emotion, 0) + 1
-            daily_entry.emotion_counts = json.dumps(counts)
-        else:
-            daily_entry = models.DailySummary(
-                user_id="user_001",
-                date_str=today_str,
-                emotion_counts=json.dumps({emotion: 1}),
-            )
-            db.add(daily_entry)
-
-        db.commit()
-
-        return {
-            "mode": "image",
-            "emotion": emotion,
-            "confidence": confidence_percent,
-        }
-
-    except Exception as e:
-        print("❌ Image analyze error:", e)
-        return {
-            "mode": "image",
-            "emotion": "Neutral",
-            "confidence": 0.0,
-        }
-        
-#=====================================================================================
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -6,7 +6,14 @@ import '../../theme/app_colors.dart';
 import '../../services/api_service.dart'; // <--- ADD THIS (Adjust path to match your project structure)
 
 class DashboardInsightsScreen extends StatefulWidget {
-  const DashboardInsightsScreen({super.key});
+  final String userId;
+  final String title;
+
+  const DashboardInsightsScreen({
+    super.key,
+    required this.userId,
+    this.title = "Dashboard",
+  });
 
   @override
   State<DashboardInsightsScreen> createState() => _DashboardInsightsScreenState();
@@ -48,8 +55,9 @@ Future<void> _loadDashboard() async {
   });
 
   try {
+    final userId = widget.userId;
     // 1) Weekly aggregates
-    final weeklyJson = await ApiService.fetchWeeklyEmotions("user_001");
+    final weeklyJson = await ApiService.fetchWeeklyEmotions(userId);
 
     final days = (weeklyJson["days"] as List<dynamic>).map((e) => e.toString()).toList();
     final series = (weeklyJson["series"] as Map<String, dynamic>);
@@ -62,11 +70,11 @@ Future<void> _loadDashboard() async {
     }
 
     // 2) Daily recommendation
-    final recJson = await ApiService.fetchDailyRecommendation("user_001");
+    final recJson = await ApiService.fetchDailyRecommendation(userId);
     final recText = (recJson["recommendation"] ?? "").toString();
 
     // ✅ 3) Latest detected emotion (from emotion_logs)
-    final latestJson = await ApiService.fetchLatestEmotion("user_001");
+    final latestJson = await ApiService.fetchLatestEmotion(userId);
     final latestEmotion = (latestJson["emotion"] ?? "No emotion detected").toString();
     final latestConf = (latestJson["confidence"] as num?)?.toDouble() ?? 0.0;
 
@@ -99,13 +107,14 @@ Future<void> _loadDashboard() async {
       appBar: AppBar(
         elevation: 0,
         backgroundColor: AppColors.background,
-        title: const Text(
-          "Dashboard",
-          style: TextStyle(
-            color: AppColors.titletext,
-            fontWeight: FontWeight.bold,
+        title: Text(
+            widget.title,
+            style: const TextStyle(
+              color: AppColors.titletext,
+              fontWeight: FontWeight.bold,
+            ),
           ),
-        ),
+
       ),
       body: ListView(
         padding: const EdgeInsets.all(18),
