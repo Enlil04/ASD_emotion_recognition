@@ -5,22 +5,20 @@ import sqlite3
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from passlib.context import CryptContext
-
 from datetime import datetime, timedelta
 from jose import jwt
-
-
-
 from setup_db import DB_PATH
 
-router = APIRouter(prefix="/auth", tags=["auth"])
+
+router = APIRouter(tags=["auth"])
+
 
 pwd_context = CryptContext(schemes=["bcrypt_sha256"], deprecated="auto")
 SECRET_KEY = "CHANGE_THIS_TO_A_LONG_RANDOM_SECRET"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_DAYS = 7
 
-
+# --- 1. Pydantic Models for Request Bodies ---
 
 class RegisterRequest(BaseModel):
     email: str
@@ -35,6 +33,8 @@ class LoginRequest(BaseModel):
     email: str
     password: str
     
+
+
 def create_access_token(user_id: str, role: str) -> str:
     expire = datetime.utcnow() + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
     payload = {"sub": user_id, "role": role, "exp": expire}

@@ -157,6 +157,33 @@ def seed_all():
                 WHERE c.post_id = community_posts.id
             )
         """)
+
+        # ... (after the mock emotion data loop) ...
+
+        # --- 6. SEED GUARDIAN RELATIONSHIPS (CRITICAL FOR TESTING) ---
+        print("🔗 Seeding Guardian/Patient links...")
+        
+        # We link 'user_004' (Sophia - Parent) to watch over 'user_001' (You - Patient)
+        # We also link 'user_003' (Liam - Mentor) to watch 'user_002' (Amina)
+        relationships = [
+            ("user_004", PRIMARY_USER), 
+            ("user_003", "user_002")
+        ]
+        
+        for guardian_id, patient_id in relationships:
+            cur.execute("""
+                INSERT OR REPLACE INTO therapist_patient 
+                (therapist_id, patient_id, date_assigned)
+                VALUES (?, ?, ?)
+            """, (guardian_id, patient_id, now_ts))
+
+        # Update the patients to have the codes too (for consistency)
+        cur.execute(f"UPDATE users SET therapist_code = 'CODE_123' WHERE user_id = '{PRIMARY_USER}'")
+        
+        print("✅ Guardian links established.")
+
+        # ... (conn.commit() follows here) ...
+        conn.commit()
         
                 # =====================================================
         # 🔹 MOCK LAST 7 DAYS FOR DASHBOARD + RECOMMENDATION
