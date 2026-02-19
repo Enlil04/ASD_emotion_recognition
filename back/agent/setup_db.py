@@ -305,6 +305,12 @@ def setup_tables():
 
     if "password_hash" not in existing_cols:
         add_col("ALTER TABLE users ADD COLUMN password_hash TEXT")
+        
+    if "dob" not in existing_cols:
+        add_col("ALTER TABLE users ADD COLUMN dob TEXT")
+        
+    
+
 
     if "is_active" not in existing_cols:
         add_col("ALTER TABLE users ADD COLUMN is_active INTEGER DEFAULT 1")

@@ -19,6 +19,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Future<Map<String, dynamic>>? _profileFuture;
   Future<Map<String, dynamic>>? _statsFuture;
   Future<List<dynamic>>? _activityFuture;
+  
 
   @override
   void initState() {
@@ -53,7 +54,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
       Future<void> loadMyCode(StateSetter setModalState) async {
         try {
           setModalState(() => loading = true);
-          final code = await ApiService.fetchMyTherapistCode(userId);
+          final code = await ApiService.fetchMyTherapistCode();
           setModalState(() {
             myCode = code;
             loading = false;
@@ -71,7 +72,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
       Future<void> regenerate(StateSetter setModalState) async {
         try {
           setModalState(() => loading = true);
-          final code = await ApiService.regenerateTherapistCode(userId);
+          final code = await ApiService.regenerateTherapistCode();
           setModalState(() {
             myCode = code;
             loading = false;
@@ -251,7 +252,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     if (userId == null || userId.isEmpty) {
       throw Exception("No user_id found in session. Please login again.");
     }
-    return ApiService.fetchUserProfile(userId);
+    return ApiService.fetchMyProfile();
   }
 
   Future<Map<String, dynamic>> _loadStats() async {
@@ -366,6 +367,171 @@ class _ProfileScreenState extends State<ProfileScreen> {
       },
     );
   }
+
+void _openEditProfileDialog(Map<String, dynamic> profile) {
+  final nameC = TextEditingController(text: (profile["name"] ?? "").toString());
+  DateTime? selectedDob;
+
+  final dobC = TextEditingController(
+    text: (profile["dob"] ?? "").toString(), // expects "YYYY-MM-DD"
+  );
+
+  if (dobC.text.isNotEmpty) {
+    try {
+      selectedDob = DateTime.parse(dobC.text);
+    } catch (_) {}
+  }
+
+  final usernameC =
+      TextEditingController(text: (profile["username"] ?? "").toString());
+
+  // Email might not be returned by /api/users/{id}. Keep optional in UI.
+  final emailC = TextEditingController(text: (profile["email"] ?? "").toString());
+
+  showDialog(
+    context: context,
+    barrierDismissible: false,
+    builder: (ctx) {
+      bool loading = false;
+
+      Future<void> save(StateSetter setStateDialog) async {
+        final newName = nameC.text.trim();
+        final newUsername = usernameC.text.trim();
+        final newEmail = emailC.text.trim();
+
+
+
+        try {
+          setStateDialog(() => loading = true);
+
+          await ApiService.updateMyProfile(
+            name: newName.isEmpty ? null : newName,
+            dob: dobC.text.trim().isEmpty ? null : dobC.text.trim(),
+            username: newUsername.isEmpty ? null : newUsername,
+            email: newEmail.isEmpty ? null : newEmail,
+          );
+
+          if (!mounted) return;
+          Navigator.of(ctx).pop();
+
+          // Reload UI
+          _refreshAll();
+
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Profile updated ✅")),
+          );
+        } catch (e) {
+          setStateDialog(() => loading = false);
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text("Update failed: $e")),
+          );
+        }
+      }
+
+      return StatefulBuilder(
+        builder: (context, setStateDialog) {
+          return AlertDialog(
+            title: const Text("Edit Profile", 
+            style: TextStyle(
+              color: AppColors.titletext
+            ),),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: nameC,
+                    decoration: const InputDecoration(labelText: "Name",
+                     labelStyle: const TextStyle(
+                        color: AppColors.titletext, 
+                      ),),
+                    style: TextStyle(
+                       color: AppColors.textDark
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+  controller: dobC,
+  readOnly: true,
+  decoration: const InputDecoration(
+    labelText: "Date of Birth",
+    labelStyle: TextStyle(color: AppColors.titletext),
+  ),
+  style: TextStyle(color: AppColors.textDark),
+  onTap: () async {
+    final now = DateTime.now();
+    final initial = selectedDob ?? DateTime(now.year - 13, now.month, now.day);
+
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: DateTime(1900, 1, 1),
+      lastDate: now,
+    );
+
+    if (picked != null) {
+      selectedDob = picked;
+      final yyyy = picked.year.toString().padLeft(4, '0');
+      final mm = picked.month.toString().padLeft(2, '0');
+      final dd = picked.day.toString().padLeft(2, '0');
+      dobC.text = "$yyyy-$mm-$dd";
+      setStateDialog(() {});
+    }
+  },
+),
+
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: usernameC,
+                    decoration: const InputDecoration(labelText: "Username",
+                     labelStyle: const TextStyle(
+                        color: AppColors.titletext, 
+                      ),
+                    ),
+                    style: TextStyle(
+                       color: AppColors.textDark
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: emailC,
+                    keyboardType: TextInputType.emailAddress,
+                    decoration: const InputDecoration(
+                      labelText: "Email",
+                       labelStyle: const TextStyle(
+                        color: AppColors.titletext, 
+                      ),
+                    ),
+                    style: TextStyle(
+                       color: AppColors.textDark
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: loading ? null : () => Navigator.of(ctx).pop(),
+                child: const Text("Cancel"),
+              ),
+              ElevatedButton(
+                onPressed: loading ? null : () => save(setStateDialog),
+                child: loading
+                    ? const SizedBox(
+                        height: 18,
+                        width: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Text("Save"),
+              ),
+            ],
+          );
+        },
+      );
+    },
+  );
+}
 
   @override
   Widget build(BuildContext context) {
@@ -509,14 +675,25 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     const SizedBox(height: 15),
 
                     // Name from DB
-                    Text(
-                      name,
-                      style: const TextStyle(
-                        fontSize: 22,
-                        color: AppColors.textDark,
-                        fontWeight: FontWeight.w600,
+                      Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(
+                        name,
+                        style: const TextStyle(
+                          fontSize: 22,
+                          color: AppColors.textDark,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
-                    ),
+                      const SizedBox(width: 6),
+                      IconButton(
+                        icon: const Icon(Icons.edit, color: AppColors.lighterblue, size: 20),
+                        onPressed: () => _openEditProfileDialog(p),
+                        tooltip: "Edit profile",
+                      ),
+                    ],
+                  ),
 
                     const SizedBox(height: 5),
 

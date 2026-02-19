@@ -70,7 +70,7 @@ Future<void> _loadDashboard() async {
     }
 
     // 2) Daily recommendation
-    final recJson = await ApiService.fetchDailyRecommendation(userId);
+    final recJson = await ApiService.fetchDailyRecommendation();
     final recText = (recJson["recommendation"] ?? "").toString();
 
     // ✅ 3) Latest detected emotion (from emotion_logs)

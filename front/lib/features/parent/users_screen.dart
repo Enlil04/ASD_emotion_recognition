@@ -35,7 +35,7 @@ class _UsersScreenState extends State<UsersScreen> {
     if (role == "therapist" || role == "parent") {
       if (userId == null || userId.isEmpty) return;
       setState(() {
-        _patientsFuture = ApiService.fetchMyPatients(userId);
+        _patientsFuture = ApiService.fetchMyPatients();
       });
     }
   }
@@ -185,7 +185,7 @@ class _UsersScreenState extends State<UsersScreen> {
               onPressed: () {
                 if (_userId == null || _userId!.isEmpty) return;
                 setState(() {
-                  _patientsFuture = ApiService.fetchMyPatients(_userId!);
+                  _patientsFuture = ApiService.fetchMyPatients();
                 });
               },
               icon: const Icon(Icons.refresh, color: AppColors.textDark),

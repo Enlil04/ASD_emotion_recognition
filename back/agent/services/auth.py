@@ -5,13 +5,13 @@ import sqlite3
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from passlib.context import CryptContext
-
 from datetime import datetime, timedelta
 from jose import jwt
-
-
-
 from setup_db import DB_PATH
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from datetime import date
+security = HTTPBearer()
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -21,6 +21,39 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_DAYS = 7
 
 
+
+def _compute_age(dob: date) -> int:
+    today = date.today()
+    return today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+
+    dob_iso = None
+    age_val = None
+
+    if req.dob:
+        try:
+            # expecting "YYYY-MM-DD"
+            dob_date = date.fromisoformat(req.dob.strip())
+            if dob_date > date.today():
+                raise HTTPException(status_code=400, detail="dob cannot be in the future")
+            dob_iso = dob_date.isoformat()
+            age_val = _compute_age(dob_date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="dob must be YYYY-MM-DD")
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload.get("sub")
+        role = payload.get("role")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return {"user_id": user_id, "role": role}
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 class RegisterRequest(BaseModel):
     email: str
@@ -63,7 +96,6 @@ def register(req: RegisterRequest):
     password_hash = pwd_context.hash(req.password)
 
     preferences = {
-        "dob": req.dob,
         **(req.extra or {}),
     }
 
@@ -72,16 +104,20 @@ def register(req: RegisterRequest):
         """
         INSERT INTO users (
             user_id, username, name, role,
+            dob, age,
             preferences_json, created_at, updated_at,
             email, password_hash, is_active
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+
         """,
         (
             user_id,
             req.username,
             req.name,
             role,
+            dob_iso,
+            age_val,
             json.dumps(preferences),
             now,
             now,

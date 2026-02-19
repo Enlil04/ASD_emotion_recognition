@@ -17,6 +17,8 @@ from services.auth import router as auth_router
 import random
 import string
 
+from services.auth import get_current_user
+
 
 # --- 1. IMPORT PATHS & DB FROM SETUP_DB (Source of Truth) ---
 # We import DB_PATH and DATA_DIR so we don't accidentally create a second file
@@ -53,12 +55,16 @@ brain = None
 # video_service = None
 
 class ChatMessage(BaseModel):
-    user_id: str
     message: str
 
 # -----------------------------------------------------------------
 # HELPER FUNCTIONS
 # -----------------------------------------------------------------
+def _compute_age(dob: date) -> int:
+    today = date.today()
+    return today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+
+
 # -------------------------------------- i added these codes for fetching the latest emotions detected
 def _fetch_latest_emotion_from_db(user_id: str) -> dict:
     """
@@ -264,7 +270,7 @@ def startup_event():
     
     try:
         # Use imported DB_PATH
-        brain = AgenticBrain(db_path=DB_PATH, user_id="user_001")
+        brain = AgenticBrain(db_path=DB_PATH)
         # detector = EmotionDetector(MODEL_FILE)
         # video_service = video_service(detector)
         print(f"✅ All systems go! Connected to DB at: {DB_PATH}")
@@ -273,39 +279,51 @@ def startup_event():
         
 #-----------------also added this new endpoint for the latest detected
 @app.get("/api/emotions/latest")
-async def latest_emotion(user_id: str, requester_id: str = None):
+async def latest_emotion(
+    user_id: str | None = None, 
+    current_user: dict = Depends(get_current_user),
+    ):
     """Latest detected emotion pulled from emotion_logs (for dashboard)."""
+    requester_id = current_user["user_id"]
+    target_id = user_id or requester_id
     con = _connect_db_row()
     try:
         cur = con.cursor()
 
-        if requester_id and requester_id != user_id:
-            if not _guardian_can_access_patient(cur, requester_id, user_id):
+        if target_id != requester_id:
+            if not _guardian_can_access_patient(cur, requester_id, target_id):
                 raise HTTPException(status_code=403, detail="Not allowed")
 
-        return _latest_emotion_display(user_id)
+        return _latest_emotion_display(target_id)
     finally:
         con.close()
 
 
 @app.get("/api/emotions/weekly")
-async def weekly_emotions(user_id: str, requester_id: str = None):
+async def weekly_emotions(
+    user_id: str | None = None, 
+    current_user: dict = Depends(get_current_user),):
     """Weekly mood series (last 7 days) used by dashboard.dart."""
+    requester_id = current_user["user_id"]
+    target_id = user_id or requester_id
     con = _connect_db_row()
     try:
         cur = con.cursor()
 
-        if requester_id and requester_id != user_id:
-            if not _guardian_can_access_patient(cur, requester_id, user_id):
+        if target_id != requester_id:
+            if not _guardian_can_access_patient(cur, requester_id, target_id):
                 raise HTTPException(status_code=403, detail="Not allowed")
 
-        return _fetch_emotion_daily(user_id)
+        return _fetch_emotion_daily(target_id)
     finally:
         con.close()
 
 
 @app.post("/chat")
-async def chat_endpoint(chat: ChatMessage):
+async def chat_endpoint(
+    chat: ChatMessage, 
+    current_user: dict = Depends(get_current_user),):
+    user_id = current_user["user_id"]
     if system_state["brain_busy"]:
         return {"response": "Thinking..."}
     
@@ -337,8 +355,10 @@ async def chat_endpoint(chat: ChatMessage):
 @app.post("/api/analyze_session")
 async def analyze_session_endpoint(
     file: UploadFile = File(...), 
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db), 
+    current_user: dict = Depends(get_current_user),
 ):
+    user_id = current_user["user_id"]
     temp_path = os.path.join(TEMP_DIR, f"temp_{int(time.time())}_{file.filename}")
     
     try:
@@ -389,14 +409,16 @@ async def analyze_session_endpoint(
             
             # Save Raw Log
             new_log = models.MoodSession(
-                user_id="user_001", emotion=emotion,
-                confidence=confidence, timestamp=time.time()
+                user_id=user_id, 
+                emotion=emotion,
+                confidence=confidence, 
+                timestamp=time.time()
             )
             db.add(new_log)
 
             # Update Daily Summary
             daily_entry = db.query(models.DailySummary).filter(
-                models.DailySummary.user_id == "user_001",
+                models.DailySummary.user_id == user_id,
                 models.DailySummary.date_str == today_str
             ).first()
 
@@ -406,7 +428,7 @@ async def analyze_session_endpoint(
                 daily_entry.emotion_counts = json.dumps(counts)
             else:
                 daily_entry = models.DailySummary(
-                    user_id="user_001", date_str=today_str,
+                    user_id=user_id, date_str=today_str,
                     emotion_counts=json.dumps({emotion: 1})
                 )
                 db.add(daily_entry)
@@ -531,13 +553,15 @@ def _is_new_user(user_id: str) -> bool:
 
 
 @app.get("/api/recommendation/today")
-async def daily_recommendation(user_id: str = "user_001"):
+async def daily_recommendation(current_user: dict = Depends(get_current_user)):
     """
     Generates a short daily recommendation based on:
     - last 7 days emotion aggregates (emotion_daily)
     - fallback to recent logs if no weekly data
     - onboarding if new user / no data
     """
+    user_id = current_user["user_id"]
+
     today_str = date.today().isoformat()
     
     # 1. Fetch Weekly Data (from emotion_daily summary)
@@ -647,23 +671,20 @@ async def daily_recommendation(user_id: str = "user_001"):
 
 # --- Pydantic Schemas ---
 class CreatePostRequest(BaseModel):
-    user_id: str
     content: str
 
 class CreateCommentRequest(BaseModel):
-    user_id: str
     content: str
 
 class LikeRequest(BaseModel):
-    user_id: str
+    pass
 
 class ReportRequest(BaseModel):
-    reporter_user_id: str
     reason: str
     
 #========================= new ============================
 class RegenerateCodeRequest(BaseModel):
-    user_id: str
+    pass
 
 class ConnectRequest(BaseModel):
     patient_id: str
@@ -821,8 +842,12 @@ async def list_community_posts(
 # (2) POST /api/community/posts  - Create a post
 # --------------------------------------------------------------------
 @app.post("/api/community/posts")
-async def create_community_post(req: CreatePostRequest):
+async def create_community_post(
+    req: CreatePostRequest,
+    current_user: dict = Depends(get_current_user),
+    ):
     """Creates a new post for a user."""
+    user_id = current_user["user_id"]
     if not req.content.strip():
         raise HTTPException(status_code=400, detail="content is required")
 
@@ -832,7 +857,7 @@ async def create_community_post(req: CreatePostRequest):
         cur = con.cursor()
 
         # verify user exists
-        u = cur.execute("SELECT user_id FROM users WHERE user_id = ?", (req.user_id,)).fetchone()
+        u = cur.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)).fetchone()
         if u is None:
             raise HTTPException(status_code=404, detail="user not found")
 
@@ -841,7 +866,7 @@ async def create_community_post(req: CreatePostRequest):
             INSERT INTO community_posts (user_id, content, likes, comments, date_created, is_deleted)
             VALUES (?, ?, 0, 0, ?, 0)
             """,
-            (req.user_id, req.content, now),
+            (user_id, req.content, now),
         )
         post_id = cur.lastrowid
         con.commit()
@@ -974,8 +999,13 @@ async def list_post_comments(
 # (5) POST /api/community/posts/{post_id}/comments  - Add comment
 # --------------------------------------------------------------------
 @app.post("/api/community/posts/{post_id}/comments")
-async def add_post_comment(post_id: int, req: CreateCommentRequest):
+async def add_post_comment(
+    post_id: int, 
+    req: CreateCommentRequest, 
+    current_user: dict = Depends(get_current_user),
+    ):
     """Adds a comment to a post and updates the cached comments count on the post."""
+    user_id = current_user["user_id"]
     if not req.content.strip():
         raise HTTPException(status_code=400, detail="content is required")
 
@@ -993,7 +1023,7 @@ async def add_post_comment(post_id: int, req: CreateCommentRequest):
             raise HTTPException(status_code=404, detail="post not found")
 
         # ensure user exists
-        u = cur.execute("SELECT user_id FROM users WHERE user_id = ?", (req.user_id,)).fetchone()
+        u = cur.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)).fetchone()
         if u is None:
             raise HTTPException(status_code=404, detail="user not found")
 
@@ -1002,7 +1032,7 @@ async def add_post_comment(post_id: int, req: CreateCommentRequest):
             INSERT INTO comments (post_id, user_id, content, date_created)
             VALUES (?, ?, ?, ?)
             """,
-            (post_id, req.user_id, req.content, now),
+            (post_id, user_id, req.content, now),
         )
 
         # update cached counter
@@ -1022,8 +1052,12 @@ async def add_post_comment(post_id: int, req: CreateCommentRequest):
 # (6) POST /api/community/posts/{post_id}/like  - Like post (idempotent)
 # --------------------------------------------------------------------
 @app.post("/api/community/posts/{post_id}/like")
-async def like_post(post_id: int, req: LikeRequest):
+async def like_post(
+    post_id: int, 
+    req: LikeRequest, 
+    current_user: dict = Depends(get_current_user)):
     """Likes a post (idempotent). Uses post_likes UNIQUE(post_id,user_id) to prevent duplicates."""
+    user_id = current_user["user_id"]
     con = _connect_db_row()
     now = time.time()
     try:
@@ -1038,13 +1072,13 @@ async def like_post(post_id: int, req: LikeRequest):
             raise HTTPException(status_code=404, detail="post not found")
 
         # ensure user exists
-        u = cur.execute("SELECT user_id FROM users WHERE user_id = ?", (req.user_id,)).fetchone()
+        u = cur.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)).fetchone()
         if u is None:
             raise HTTPException(status_code=404, detail="user not found")
 
         cur.execute(
             "INSERT OR IGNORE INTO post_likes (post_id, user_id, date_created) VALUES (?, ?, ?)",
-            (post_id, req.user_id, now),
+            (post_id, user_id, now),
         )
 
         like_count = cur.execute(
@@ -1063,8 +1097,12 @@ async def like_post(post_id: int, req: LikeRequest):
 # (7) POST /api/community/posts/{post_id}/unlike  - Unlike post
 # --------------------------------------------------------------------
 @app.post("/api/community/posts/{post_id}/unlike")
-async def unlike_post(post_id: int, req: LikeRequest):
+async def unlike_post(
+    post_id: int,
+    req: LikeRequest,
+    current_user: dict = Depends(get_current_user),):
     """Removes a like from a post and updates the cached likes count."""
+    user_id = current_user["user_id"]
     con = _connect_db_row()
     try:
         cur = con.cursor()
@@ -1077,7 +1115,7 @@ async def unlike_post(post_id: int, req: LikeRequest):
         if p is None or int(p["is_deleted"] or 0) == 1:
             raise HTTPException(status_code=404, detail="post not found")
 
-        cur.execute("DELETE FROM post_likes WHERE post_id = ? AND user_id = ?", (post_id, req.user_id))
+        cur.execute("DELETE FROM post_likes WHERE post_id = ? AND user_id = ?", (post_id, user_id))
 
         like_count = cur.execute(
             "SELECT COUNT(*) FROM post_likes WHERE post_id = ?",
@@ -1119,8 +1157,12 @@ async def get_user_profile(user_id: str):
 # (9) POST /api/community/posts/{post_id}/report  - Report a post
 # --------------------------------------------------------------------
 @app.post("/api/community/posts/{post_id}/report")
-async def report_post(post_id: int, req: ReportRequest):
+async def report_post(
+    post_id: int, 
+    req: ReportRequest,
+    current_user: dict = Depends(get_current_user),):
     """Creates a report record for moderation review."""
+    reporter_user_id = current_user["user_id"]
     con = _connect_db_row()
     now = time.time()
     try:
@@ -1135,7 +1177,7 @@ async def report_post(post_id: int, req: ReportRequest):
             raise HTTPException(status_code=404, detail="post not found")
 
         # ensure reporter exists
-        u = cur.execute("SELECT user_id FROM users WHERE user_id = ?", (req.reporter_user_id,)).fetchone()
+        u = cur.execute("SELECT user_id FROM users WHERE user_id = ?", (reporter_user_id,)).fetchone()
         if u is None:
             raise HTTPException(status_code=404, detail="reporter user not found")
 
@@ -1144,7 +1186,7 @@ async def report_post(post_id: int, req: ReportRequest):
             INSERT INTO community_reports (post_id, reporter_user_id, reason, date_created)
             VALUES (?, ?, ?, ?)
             """,
-            (post_id, req.reporter_user_id, req.reason, now),
+            (post_id, reporter_user_id, req.reason, now),
         )
         con.commit()
         return {"ok": True, "post_id": post_id}
@@ -1156,13 +1198,17 @@ async def report_post(post_id: int, req: ReportRequest):
 # (10) DELETE /api/community/posts/{post_id}  - Delete (soft delete)
 # --------------------------------------------------------------------
 @app.delete("/api/community/posts/{post_id}")
-async def delete_post(post_id: int, requester_user_id: str):
+async def delete_post(
+    post_id: int, 
+     current_user: dict = Depends(get_current_user),
+    ):
     """
     Soft-deletes a post.
     Allowed if requester is:
     - the author of the post, OR
     - a user with role 'admin' or 'moderator'
     """
+    requester_user_id = current_user["user_id"]
     con = _connect_db_row()
     try:
         cur = con.cursor()
@@ -1203,7 +1249,10 @@ async def delete_post(post_id: int, requester_user_id: str):
 
 #1. get therapist code 
 @app.get("/api/therapist/my_code")
-async def therapist_my_code(user_id: str):
+async def therapist_my_code(
+    current_user: dict = Depends(get_current_user)
+    ):
+    user_id = current_user["user_id"]
     con = _connect_db_row()
     try:
         cur = con.cursor()
@@ -1246,14 +1295,18 @@ async def therapist_my_code(user_id: str):
 
 # 2. regenerate code 
 @app.post("/api/therapist/regenerate_code")
-async def therapist_regenerate_code(req: RegenerateCodeRequest):
+async def therapist_regenerate_code(
+    req: RegenerateCodeRequest, 
+     current_user: dict = Depends(get_current_user)):
+    
+    user_id = current_user["user_id"]
     con = _connect_db_row()
     try:
         cur = con.cursor()
 
         u = cur.execute(
             "SELECT user_id, role FROM users WHERE user_id = ?",
-            (req.user_id,),
+            (user_id,),
         ).fetchone()
 
         if not u:
@@ -1268,10 +1321,10 @@ async def therapist_regenerate_code(req: RegenerateCodeRequest):
             try:
                 cur.execute(
                     "UPDATE users SET therapist_code = ? WHERE user_id = ?",
-                    (new_code, req.user_id),
+                    (new_code, user_id),
                 )
                 con.commit()
-                return {"user_id": req.user_id, "code": new_code}
+                return {"user_id": user_id, "code": new_code}
             except Exception:
                 continue
 
@@ -1330,20 +1383,20 @@ async def connect_patient(req: ConnectRequest):
 
     finally:
         con.close()
-
+        
 # 4. therapist (or parent) list their patients (or childern)
-@app.get("/api/therapist/{therapist_id}/patients")
-async def get_guardian_patients(therapist_id: str):
+@app.get("/api/therapist/my_patients")
+async def my_patients(current_user: dict = Depends(get_current_user)):
+    therapist_id = current_user["user_id"]
+
     con = _connect_db_row()
     try:
         cur = con.cursor()
 
-        # validate guardian role
         g = cur.execute(
             "SELECT role FROM users WHERE user_id = ?",
             (therapist_id,),
         ).fetchone()
-
         if not g or (g["role"] or "").lower() not in ("therapist", "parent"):
             raise HTTPException(status_code=403, detail="not allowed")
 
@@ -1358,21 +1411,53 @@ async def get_guardian_patients(therapist_id: str):
             (therapist_id,),
         ).fetchall()
 
-        return {
-            "items": [
-                {
-                    "user_id": r["user_id"],
-                    "name": r["name"],
-                    "username": r["username"],
-                    "age": r["age"],
-                    "photo": r["photo"],
-                }
-                for r in rows
-            ]
-        }
-
+        return {"items": [dict(r) for r in rows]}
     finally:
         con.close()
+
+
+# # 4. therapist (or parent) list their patients (or childern)
+# @app.get("/api/therapist/{therapist_id}/patients")
+# async def get_guardian_patients(therapist_id: str):
+#     con = _connect_db_row()
+#     try:
+#         cur = con.cursor()
+
+#         # validate guardian role
+#         g = cur.execute(
+#             "SELECT role FROM users WHERE user_id = ?",
+#             (therapist_id,),
+#         ).fetchone()
+
+#         if not g or (g["role"] or "").lower() not in ("therapist", "parent"):
+#             raise HTTPException(status_code=403, detail="not allowed")
+
+#         rows = cur.execute(
+#             """
+#             SELECT u.user_id, u.name, u.username, u.age, u.photo
+#             FROM therapist_patient tp
+#             JOIN users u ON u.user_id = tp.patient_id
+#             WHERE tp.therapist_id = ?
+#             ORDER BY tp.date_assigned DESC
+#             """,
+#             (therapist_id,),
+#         ).fetchall()
+
+#         return {
+#             "items": [
+#                 {
+#                     "user_id": r["user_id"],
+#                     "name": r["name"],
+#                     "username": r["username"],
+#                     "age": r["age"],
+#                     "photo": r["photo"],
+#                 }
+#                 for r in rows
+#             ]
+#         }
+
+#     finally:
+#         con.close()
 
 # ==============================
 # PROFILE ACTIVITY + STATS (new)
@@ -1390,7 +1475,7 @@ def _activity_item(ts: float, kind: str, title: str, subtitle: str = "", meta: d
 
 @app.get("/api/profile/activity")
 async def profile_activity(
-    user_id: str = "user_001",
+    current_user: dict = Depends(get_current_user),
     limit: int = Query(10, ge=1, le=50),
     offset: int = Query(0, ge=0),
 ):
@@ -1403,6 +1488,8 @@ async def profile_activity(
       - likes (post_likes)
     Returns newest-first, paged via limit/offset.
     """
+    user_id = current_user["user_id"]
+
     con = _connect_db_row()
     try:
         cur = con.cursor()
@@ -1520,11 +1607,12 @@ async def profile_activity(
 
 
 @app.get("/api/profile/stats")
-async def profile_stats(user_id: str = "user_001"):
+async def profile_stats(current_user: dict = Depends(get_current_user)):
     """
     Profile stats including total 'activities' count (for the Profile stats row).
     Pulls streak/connections from users table if present.
     """
+    user_id = current_user["user_id"]
     con = _connect_db_row()
     try:
         cur = con.cursor()
@@ -1580,6 +1668,126 @@ async def profile_stats(user_id: str = "user_001"):
     finally:
         con.close()
 #-------------------------------------------------------------------------
+
+
+#update profile (new) --------------------------------------------------------
+from typing import Optional
+from pydantic import BaseModel, EmailStr
+
+class UpdateMyProfileRequest(BaseModel):
+    name: Optional[str] = None
+    dob: Optional[date] = None
+    username: Optional[str] = None
+    email: Optional[EmailStr] = None  # if your table has email
+
+@app.get("/api/profile/me")
+async def get_my_profile(current_user: dict = Depends(get_current_user)):
+    user_id = current_user["user_id"]
+    con = _connect_db_row()
+    try:
+        cur = con.cursor()
+        row = cur.execute(
+            """
+            SELECT user_id, name, username, role, age, dob, email, description, photo, streak, connections
+            FROM users
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="user not found")
+        return dict(row)
+    finally:
+        con.close()
+
+
+@app.put("/api/profile/me")
+async def update_my_profile(
+    req: UpdateMyProfileRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    user_id = current_user["user_id"]
+
+    con = _connect_db_row()
+    try:
+        cur = con.cursor()
+
+        # Detect available columns (so we don't crash if some cols don't exist)
+        cols = {c[1] for c in cur.execute("PRAGMA table_info(users)").fetchall()}
+
+        updates = {}
+        if req.name is not None and "name" in cols:
+            updates["name"] = req.name.strip()
+
+        if req.dob is not None and "dob" in cols:
+            if req.dob > date.today():
+                raise HTTPException(status_code=400, detail="dob cannot be in the future")
+
+            age = _compute_age(req.dob)
+            if age < 0 or age > 120:
+                raise HTTPException(status_code=400, detail="invalid dob")
+
+            updates["dob"] = req.dob.isoformat()
+
+            # keep age column updated too (since other endpoints currently select age)
+            if "age" in cols:
+                updates["age"] = int(age)
+
+
+        if req.username is not None and "username" in cols:
+            new_username = req.username.strip()
+            if not new_username:
+                raise HTTPException(status_code=400, detail="username cannot be empty")
+
+            # Uniqueness check (if you want it)
+            taken = cur.execute(
+                "SELECT 1 FROM users WHERE username = ? AND user_id != ? LIMIT 1",
+                (new_username, user_id),
+            ).fetchone()
+            if taken:
+                raise HTTPException(status_code=409, detail="username already taken")
+
+            updates["username"] = new_username
+
+        if req.email is not None and "email" in cols:
+            new_email = str(req.email).strip().lower()
+
+            taken = cur.execute(
+                "SELECT 1 FROM users WHERE email = ? AND user_id != ? LIMIT 1",
+                (new_email, user_id),
+            ).fetchone()
+            if taken:
+                raise HTTPException(status_code=409, detail="email already taken")
+
+            updates["email"] = new_email
+
+        if not updates:
+            return {"ok": True, "message": "nothing to update"}
+
+        set_sql = ", ".join([f"{k} = ?" for k in updates.keys()])
+        values = list(updates.values())
+
+        cur.execute(f"UPDATE users SET {set_sql} WHERE user_id = ?", (*values, user_id))
+        con.commit()
+
+        # Return updated profile (public fields)
+        row = cur.execute(
+            """
+            SELECT user_id, name, username, role, age, description, photo, streak, connections
+            FROM users
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="user not found")
+
+        return _dict_user_public(row)
+
+    finally:
+        con.close()
+#---------------------------------------------------------------------------------------
 
 
 

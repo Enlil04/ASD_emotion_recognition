@@ -46,7 +46,6 @@ class _CommunityScreenState extends State<CommunityScreen> {
 
     try {
       final res = await ApiService.fetchCommunityPosts(
-        userId: _currentUserId,
         limit: 50,
         offset: 0,
       );
@@ -175,7 +174,6 @@ class _CommunityScreenState extends State<CommunityScreen> {
 
                         try {
                           await ApiService.createCommunityPost(
-                            userId: _currentUserId,
                             content: content,
                           );
                           if (mounted) Navigator.pop(ctx, true);
@@ -398,10 +396,10 @@ class _CommunityScreenState extends State<CommunityScreen> {
 
             try {
               if (!liked) {
-                final res = await ApiService.likePost(postId: postId, userId: _currentUserId);
+                final res = await ApiService.likePost(postId: postId);
                 p["likes"] = res["likes"] ?? p["likes"];
               } else {
-                final res = await ApiService.unlikePost(postId: postId, userId: _currentUserId);
+                final res = await ApiService.unlikePost(postId: postId);
                 p["likes"] = res["likes"] ?? p["likes"];
               }
               if (mounted) setState(() {});
@@ -621,7 +619,6 @@ class _CommunityPostDetailScreenState extends State<CommunityPostDetailScreen> {
 
       final freshPost = await ApiService.fetchCommunityPostDetail(
         postId: postId,
-        userId: widget.currentUserId,
       );
 
       final resComments = await ApiService.fetchPostComments(
@@ -671,7 +668,6 @@ class _CommunityPostDetailScreenState extends State<CommunityPostDetailScreen> {
 
       final res = await ApiService.addPostComment(
         postId: postId,
-        userId: widget.currentUserId,
         content: text,
       );
 
@@ -770,13 +766,11 @@ class _CommunityPostDetailScreenState extends State<CommunityPostDetailScreen> {
                                     if (!liked) {
                                       final r = await ApiService.likePost(
                                         postId: postId,
-                                        userId: widget.currentUserId,
                                       );
                                       setState(() => _post["likes"] = r["likes"] ?? _post["likes"]);
                                     } else {
                                       final r = await ApiService.unlikePost(
                                         postId: postId,
-                                        userId: widget.currentUserId,
                                       );
                                       setState(() => _post["likes"] = r["likes"] ?? _post["likes"]);
                                     }

@@ -6,7 +6,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 class ApiService {
   
-  static const String baseUrl = 'http://10.242.197.50:8000';
+  static const String baseUrl = 'http://10.150.174.50:8000';
   static const _storage = FlutterSecureStorage();
 
 //------------------------ register here ---------------------------------
@@ -152,12 +152,11 @@ static Future<List<dynamic>> fetchProfileActivity(String userId,
   static Future<String> sendMessage(String message) async {
     try {
       final url = Uri.parse('$baseUrl/chat');
-      
+      final headers = await authHeaders();
       final response = await http.post(
         url,
-        headers: {"Content-Type": "application/json"},
+        headers: headers,
         body: jsonEncode({
-          "user_id": "user_001", 
           "message": message
         }),
       ).timeout(const Duration(seconds: 180)); 
@@ -181,7 +180,10 @@ static Future<List<dynamic>> fetchProfileActivity(String userId,
         'POST', 
         Uri.parse('$baseUrl/api/analyze_session')
       );
-      
+      final token = await getToken();
+      if (token != null) {
+        request.headers["Authorization"] = "Bearer $token";
+      }
       request.files.add(
         await http.MultipartFile.fromPath(
           'file', 
@@ -207,9 +209,14 @@ static Future<List<dynamic>> fetchProfileActivity(String userId,
   // --- NEW METHODS FOR DASHBOARD ---
 
   static Future<Map<String, dynamic>> fetchWeeklyEmotions(String userId) async {
-    final url = Uri.parse("$baseUrl/api/emotions/weekly?user_id=$userId");
-    final response = await http.get(url);
-
+    // final url = Uri.parse("$baseUrl/api/emotions/weekly?user_id=$userId");
+     final url = Uri.parse("$baseUrl/api/emotions/weekly").replace(
+    queryParameters: (userId != null && userId.isNotEmpty)
+        ? {"user_id": userId}
+        : null,
+     );
+    //final response = await http.get(url);
+    final response = await http.get(url, headers: await authHeaders());
     if (response.statusCode == 200) {
       return jsonDecode(response.body) as Map<String, dynamic>;
     } else {
@@ -217,9 +224,9 @@ static Future<List<dynamic>> fetchProfileActivity(String userId,
     }
   }
 
-  static Future<Map<String, dynamic>> fetchDailyRecommendation(String userId) async {
-    final url = Uri.parse("$baseUrl/api/recommendation/today?user_id=$userId");
-    final response = await http.get(url);
+  static Future<Map<String, dynamic>> fetchDailyRecommendation() async {
+    final url = Uri.parse("$baseUrl/api/recommendation/today");
+    final response = await http.get(url, headers: await authHeaders());
 
     if (response.statusCode == 200) {
       return jsonDecode(response.body) as Map<String, dynamic>;
@@ -229,8 +236,12 @@ static Future<List<dynamic>> fetchProfileActivity(String userId,
   }
 
   static Future<Map<String, dynamic>> fetchLatestEmotion(String userId) async {
-  final url = Uri.parse("$baseUrl/api/emotions/latest?user_id=$userId");
-  final response = await http.get(url);
+  final url = Uri.parse("$baseUrl/api/emotions/latest").replace(
+    queryParameters: (userId != null && userId.isNotEmpty)
+        ? {"user_id": userId}
+        : null,
+  );
+   final response = await http.get(url, headers: await authHeaders());
 
   if (response.statusCode == 200) {
     return jsonDecode(response.body) as Map<String, dynamic>;
@@ -246,7 +257,6 @@ static Future<List<dynamic>> fetchProfileActivity(String userId,
 
   // (1) GET /api/community/posts  - Feed (paged)
   static Future<Map<String, dynamic>> fetchCommunityPosts({
-    String? userId,
     int limit = 20,
     int offset = 0,
   }) async {
@@ -254,10 +264,11 @@ static Future<List<dynamic>> fetchProfileActivity(String userId,
       "limit": "$limit",
       "offset": "$offset",
     };
-    if (userId != null && userId.isNotEmpty) {
-      qs["user_id"] = userId; // enables liked_by_me on backend
-    }
-
+    final me = await getUserId();
+    if (me != null && me.isNotEmpty) qs["user_id"] = me;
+    // if (userId != null && userId.isNotEmpty) {
+    //   qs["user_id"] = userId; // enables liked_by_me on backend
+    // }
     final url = Uri.parse("$baseUrl/api/community/posts").replace(queryParameters: qs);
     final response = await http.get(url);
 
@@ -270,15 +281,13 @@ static Future<List<dynamic>> fetchProfileActivity(String userId,
 
   // (2) POST /api/community/posts  - Create a post
   static Future<Map<String, dynamic>> createCommunityPost({
-    required String userId,
     required String content,
   }) async {
     final url = Uri.parse("$baseUrl/api/community/posts");
     final response = await http.post(
       url,
-      headers: {"Content-Type": "application/json"},
+      headers:  await authHeaders(),
       body: jsonEncode({
-        "user_id": userId,
         "content": content,
       }),
     );
@@ -293,13 +302,13 @@ static Future<List<dynamic>> fetchProfileActivity(String userId,
   // (3) GET /api/community/posts/{post_id}  - Post detail
   static Future<Map<String, dynamic>> fetchCommunityPostDetail({
     required int postId,
-    String? userId,
   }) async {
-    final url = (userId != null && userId.isNotEmpty)
-        ? Uri.parse("$baseUrl/api/community/posts/$postId?user_id=$userId")
-        : Uri.parse("$baseUrl/api/community/posts/$postId");
+     final me = await getUserId();
+    final url = Uri.parse("$baseUrl/api/community/posts/$postId").replace(
+    queryParameters: (me != null && me.isNotEmpty) ? {"user_id": me} : null,
+  );
+      final response = await http.get(url, headers: await authHeaders());
 
-    final response = await http.get(url);
 
     if (response.statusCode == 200) {
       return jsonDecode(response.body) as Map<String, dynamic>;
@@ -314,13 +323,11 @@ static Future<List<dynamic>> fetchProfileActivity(String userId,
     int limit = 30,
     int offset = 0,
   }) async {
-    final url = Uri.parse("$baseUrl/api/community/posts/$postId/comments")
-        .replace(queryParameters: {
-      "limit": "$limit",
-      "offset": "$offset",
-    });
+    final url = Uri.parse("$baseUrl/api/community/posts/$postId/comments").replace(
+    queryParameters: {"limit": "$limit", "offset": "$offset"},
+  );
 
-    final response = await http.get(url);
+  final response = await http.get(url, headers: await authHeaders());
 
     if (response.statusCode == 200) {
       return jsonDecode(response.body) as Map<String, dynamic>;
@@ -332,18 +339,14 @@ static Future<List<dynamic>> fetchProfileActivity(String userId,
   // (5) POST /api/community/posts/{post_id}/comments  - Add comment
   static Future<Map<String, dynamic>> addPostComment({
     required int postId,
-    required String userId,
     required String content,
   }) async {
     final url = Uri.parse("$baseUrl/api/community/posts/$postId/comments");
-    final response = await http.post(
-      url,
-      headers: {"Content-Type": "application/json"},
-      body: jsonEncode({
-        "user_id": userId,
-        "content": content,
-      }),
-    );
+   final response = await http.post(
+    url,
+    headers: await authHeaders(),
+    body: jsonEncode({"content": content}),
+  );
 
     if (response.statusCode == 200) {
       return jsonDecode(response.body) as Map<String, dynamic>;
@@ -355,13 +358,12 @@ static Future<List<dynamic>> fetchProfileActivity(String userId,
   // (6) POST /api/community/posts/{post_id}/like  - Like post
   static Future<Map<String, dynamic>> likePost({
     required int postId,
-    required String userId,
   }) async {
     final url = Uri.parse("$baseUrl/api/community/posts/$postId/like");
     final response = await http.post(
       url,
-      headers: {"Content-Type": "application/json"},
-      body: jsonEncode({"user_id": userId}),
+      headers: await authHeaders(),
+      body: jsonEncode({}),
     );
 
     if (response.statusCode == 200) {
@@ -374,13 +376,12 @@ static Future<List<dynamic>> fetchProfileActivity(String userId,
   // (7) POST /api/community/posts/{post_id}/unlike  - Unlike post
   static Future<Map<String, dynamic>> unlikePost({
     required int postId,
-    required String userId,
   }) async {
     final url = Uri.parse("$baseUrl/api/community/posts/$postId/unlike");
     final response = await http.post(
       url,
-      headers: {"Content-Type": "application/json"},
-      body: jsonEncode({"user_id": userId}),
+      headers: await authHeaders(),
+      body: jsonEncode({}),
     );
 
     if (response.statusCode == 200) {
@@ -405,15 +406,13 @@ static Future<List<dynamic>> fetchProfileActivity(String userId,
   // (9) POST /api/community/posts/{post_id}/report  - Report a post
   static Future<Map<String, dynamic>> reportPost({
     required int postId,
-    required String reporterUserId,
     required String reason,
   }) async {
     final url = Uri.parse("$baseUrl/api/community/posts/$postId/report");
     final response = await http.post(
       url,
-      headers: {"Content-Type": "application/json"},
+      headers:await authHeaders(),
       body: jsonEncode({
-        "reporter_user_id": reporterUserId,
         "reason": reason,
       }),
     );
@@ -429,12 +428,10 @@ static Future<List<dynamic>> fetchProfileActivity(String userId,
   // NOTE: backend expects requester_user_id as query param (not JSON body)
   static Future<Map<String, dynamic>> deletePost({
     required int postId,
-    required String requesterUserId,
   }) async {
-    final url = Uri.parse("$baseUrl/api/community/posts/$postId")
-        .replace(queryParameters: {"requester_user_id": requesterUserId});
+    final url = Uri.parse("$baseUrl/api/community/posts/$postId");
 
-    final response = await http.delete(url);
+    final response = await http.delete(url, headers: await authHeaders());
 
     if (response.statusCode == 200) {
       return jsonDecode(response.body) as Map<String, dynamic>;
@@ -447,9 +444,10 @@ static Future<List<dynamic>> fetchProfileActivity(String userId,
 // THERAPIST/PARENT <-> USER LINKING
 // ==============================
 
-static Future<String> fetchMyTherapistCode(String userId) async {
-  final url = Uri.parse("$baseUrl/api/therapist/my_code?user_id=$userId");
-  final response = await http.get(url);
+static Future<String> fetchMyTherapistCode() async {
+  final url = Uri.parse("$baseUrl/api/therapist/my_code");
+  final response = await http.get(url, headers: await authHeaders());
+
 
   if (response.statusCode == 200) {
     final data = jsonDecode(response.body) as Map<String, dynamic>;
@@ -459,12 +457,12 @@ static Future<String> fetchMyTherapistCode(String userId) async {
   }
 }
 
-static Future<String> regenerateTherapistCode(String userId) async {
+static Future<String> regenerateTherapistCode() async {
   final url = Uri.parse("$baseUrl/api/therapist/regenerate_code");
   final response = await http.post(
     url,
-    headers: {"Content-Type": "application/json"},
-    body: jsonEncode({"user_id": userId}),
+    headers:await authHeaders(),
+    body: jsonEncode({}),
   );
 
   if (response.statusCode == 200) {
@@ -482,7 +480,7 @@ static Future<void> connectWithCode({
   final url = Uri.parse("$baseUrl/api/therapist/connect");
   final response = await http.post(
     url,
-    headers: {"Content-Type": "application/json"},
+    headers:await authHeaders(),
     body: jsonEncode({
       "patient_id": patientId,
       "code": code,
@@ -497,9 +495,10 @@ static Future<void> connectWithCode({
 }
 
 // Optional for later (therapist screen)
-static Future<List<dynamic>> fetchMyPatients(String therapistId) async {
-  final url = Uri.parse("$baseUrl/api/therapist/$therapistId/patients");
-  final response = await http.get(url);
+static Future<List<dynamic>> fetchMyPatients() async {
+  final url = Uri.parse("$baseUrl/api/therapist/patients");
+   final response = await http.get(url, headers: await authHeaders());
+
 
   if (response.statusCode == 200) {
     final data = jsonDecode(response.body) as Map<String, dynamic>;
@@ -508,6 +507,41 @@ static Future<List<dynamic>> fetchMyPatients(String therapistId) async {
     throw Exception("Fetch patients failed: ${response.statusCode} ${response.body}");
   }
 }
+
+
+// update profile -------------------------------------------------------
+
+static Future<Map<String, dynamic>> fetchMyProfile() async {
+  final url = Uri.parse("$baseUrl/api/profile/me");
+  final res = await http.get(url, headers: await authHeaders());
+  if (res.statusCode == 200) return jsonDecode(res.body) as Map<String, dynamic>;
+  throw Exception("Fetch my profile failed: ${res.statusCode} ${res.body}");
+}
+
+static Future<Map<String, dynamic>> updateMyProfile({
+  String? name,
+  String? dob,
+  String? username,
+  String? email,
+}) async {
+  final url = Uri.parse("$baseUrl/api/profile/me");
+
+  final body = <String, dynamic>{};
+  if (name != null) body["name"] = name.trim();
+   if (dob != null) body["dob"] = dob.trim(); // "YYYY-MM-DD"
+  if (username != null) body["username"] = username.trim();
+  if (email != null) body["email"] = email.trim();
+
+  final res = await http
+      .put(url, headers: await authHeaders(), body: jsonEncode(body))
+      .timeout(const Duration(seconds: 20));
+
+  if (res.statusCode == 200) {
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+  throw Exception("Update profile failed: ${res.statusCode} ${res.body}");
+}
+//-------------------------------------------------------
 
 
 }

@@ -10,6 +10,8 @@ class ParentSignUp extends StatefulWidget {
 }
 
 class _ParentSignUpState extends State<ParentSignUp> {
+    final _firstNameC = TextEditingController();
+  final _lastNameC = TextEditingController();
   final TextEditingController _dateOfBirthController = TextEditingController();
   final _usernameC = TextEditingController();
   final _emailC = TextEditingController();
@@ -19,6 +21,8 @@ class _ParentSignUpState extends State<ParentSignUp> {
 
   @override
   void dispose() {
+      _firstNameC.dispose();
+    _lastNameC.dispose();
     _usernameC.dispose();
     _emailC.dispose();
     _pwC.dispose();
@@ -120,7 +124,16 @@ class _ParentSignUpState extends State<ParentSignUp> {
                    style: ButtonStyle(
                     backgroundColor: WidgetStatePropertyAll(AppColors.background),
                     iconSize: WidgetStatePropertyAll(90.0)
-                   ), ),
+                   ), ),SizedBox(height: 16.0,),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Expanded(child: _buildTextField(field: "First Name", icon: Icons.person_3_outlined, controller: _firstNameC)),
+                      SizedBox(width: 10.0,),
+                      Expanded(child: _buildTextField(field: "Last Name", icon: Icons.person_3_outlined, controller:_lastNameC))
+                    ],
+                  ),
                   SizedBox(height: 16.0,),
                   _buildTextField(
                     field: "Username",
@@ -144,13 +157,15 @@ class _ParentSignUpState extends State<ParentSignUp> {
 
                     ElevatedButton(
                   onPressed: _loading ? null : () async {
+                      final first = _firstNameC.text.trim();
+                      final last = _lastNameC.text.trim();
                       final username = _usernameC.text.trim();
                       final email = _emailC.text.trim();
                       final pw = _pwC.text;
                       final pw2 = _pw2C.text;
                       final dob = _dateOfBirthController.text.trim();
 
-                      if (username.isEmpty || email.isEmpty || pw.isEmpty) {
+                      if (first.isEmpty || last.isEmpty ||username.isEmpty || email.isEmpty || pw.isEmpty) {
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(content: Text("Fill username, email, and password.")),
                         );
@@ -171,6 +186,7 @@ class _ParentSignUpState extends State<ParentSignUp> {
                           password: pw,
                           role: "parent",
                           username: username,
+                          name: "$first $last",
                           dob: dob.isEmpty ? null : dob,
                           extra: {"child_count": 1}, // optional
                         );

@@ -13,9 +13,11 @@ class UserSignUp extends StatefulWidget {
 
 class _UserSignUpState extends State<UserSignUp> {
   final TextEditingController _dateOfBirthController = TextEditingController();
+    final _firstNameC = TextEditingController();
+  final _lastNameC = TextEditingController();
   final _usernameC = TextEditingController();
   final _emailC = TextEditingController();        // if you collect user email
-  final _guardianEmailC = TextEditingController();
+  //final _guardianEmailC = TextEditingController();
   final _pwC = TextEditingController();
   final _pw2C = TextEditingController();
 
@@ -23,9 +25,11 @@ class _UserSignUpState extends State<UserSignUp> {
 
   @override
   void dispose() {
+      _firstNameC.dispose();
+    _lastNameC.dispose();
     _usernameC.dispose();
     _emailC.dispose();
-    _guardianEmailC.dispose();
+   // _guardianEmailC.dispose();
     _pwC.dispose();
     _pw2C.dispose();
     _dateOfBirthController.dispose();
@@ -125,7 +129,16 @@ class _UserSignUpState extends State<UserSignUp> {
                    style: ButtonStyle(
                     backgroundColor: WidgetStatePropertyAll(AppColors.background),
                     iconSize: WidgetStatePropertyAll(90.0)
-                   ), ),
+                   ), ),SizedBox(height: 16.0,),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Expanded(child: _buildTextField(field: "First Name", icon: Icons.person_3_outlined, controller: _firstNameC)),
+                      SizedBox(width: 10.0,),
+                      Expanded(child: _buildTextField(field: "Last Name", icon: Icons.person_3_outlined, controller:_lastNameC))
+                    ],
+                  ),
                   SizedBox(height: 16.0,),
                   _buildTextField(
                     field: "Username",
@@ -144,18 +157,20 @@ class _UserSignUpState extends State<UserSignUp> {
                    onTap: ()=> _selectDate(context)
                   ),
                   SizedBox(height: 16.0,),
-                  _buildTextField(field: "Guardian Email", icon: Icons.email_rounded, controller: _guardianEmailC),
+                  _buildTextField(field: "Email", icon: Icons.email_rounded, controller: _emailC),
                   SizedBox(height: 16.0,),
                   
                   ElevatedButton(
                   onPressed: _loading ? null : () async {
+                     final first = _firstNameC.text.trim();
+                      final last = _lastNameC.text.trim();
                       final username = _usernameC.text.trim();
-                      final guardianEmail = _guardianEmailC.text.trim();
+                      final email = _emailC.text.trim();
                       final pw = _pwC.text;
                       final pw2 = _pw2C.text;
                       final dob = _dateOfBirthController.text.trim();
 
-                      if (username.isEmpty || guardianEmail.isEmpty || pw.isEmpty) {
+                      if (first.isEmpty || last.isEmpty ||username.isEmpty || email.isEmpty || pw.isEmpty) {
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(content: Text("Please fill all required fields.")),
                         );
@@ -172,14 +187,13 @@ class _UserSignUpState extends State<UserSignUp> {
                       setState(() => _loading = true);
                       try {
                         await ApiService.register(
-                          email: guardianEmail,        // login email
+                          email: email,        // login email
                           password: pw,
                           role: "user",
                           username: username,
+                          name: "$first $last",
                           dob: dob.isEmpty ? null : dob,
-                          extra: {
-                            "guardian_email": guardianEmail,
-                          },
+                          
                         );
 
                         if (!mounted) return;
