@@ -7,8 +7,8 @@ and memory systems, queries the LLM for a decision, executes the resulting
 tools (actions), and logs the interaction to the database for future recall.
 """
 
-from llama_reasoner import LlamaReasoner
-from memory_manager import MemoryManager
+from agent.llama_reasoner import LlamaReasoner
+from agent.memory_manager import MemoryManager
 
 class AgenticBrain:
     def __init__(self, db_path: str = None, user_id: str = "user_001"):

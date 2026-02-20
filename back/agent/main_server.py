@@ -11,26 +11,29 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 #for signup
-from services.auth import router as auth_router
+from agent.services.auth import router as auth_router
 
 #for code generation from therapist side
 import random
 import string
 
-from services.auth import get_current_user
+from agent.services.auth import get_current_user
+from sqlalchemy import text
+
+from agent.services.image_service import image_service
 
 
 # --- 1. IMPORT PATHS & DB FROM SETUP_DB (Source of Truth) ---
 # We import DB_PATH and DATA_DIR so we don't accidentally create a second file
-from setup_db import Base, engine, get_db, DB_PATH, DATA_DIR
-import services.models as models
+from agent.setup_db import Base, engine, get_db, DB_PATH, DATA_DIR
+import agent.services.models as models
 
-from react_agent import AgenticBrain
+from agent.react_agent import AgenticBrain
 from analytics.vision_models.emotion_detector import EmotionDetector, MODEL_FILE
-from services.video_service import video_service 
+from agent.services.video_service import video_service 
 
 
-from services.analytics import _calculate_stats, _fetch_recent_raw_logs, _is_new_user
+from agent.services.analytics import _calculate_stats, _fetch_recent_raw_logs, _is_new_user
 
 # Ensure tables exist (using the imported engine)
 Base.metadata.create_all(bind=engine)
@@ -60,6 +63,28 @@ class ChatMessage(BaseModel):
 # -----------------------------------------------------------------
 # HELPER FUNCTIONS
 # -----------------------------------------------------------------
+
+def compute_streak_from_emotion_daily(db: Session, user_id: str, days_cap: int = 365) -> int:
+    streak = 0
+    d = date.today()
+
+    for _ in range(days_cap):
+        day_str = d.isoformat()
+
+        exists = db.execute(
+            text("SELECT 1 FROM emotion_daily WHERE user_id = :uid AND date_str = :ds LIMIT 1"),
+            {"uid": user_id, "ds": day_str},
+        ).fetchone()
+
+        if not exists:
+            break
+
+        streak += 1
+        d -= timedelta(days=1)
+
+    return streak
+
+
 def _compute_age(dob: date) -> int:
     today = date.today()
     return today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
@@ -434,6 +459,18 @@ async def analyze_session_endpoint(
                 db.add(daily_entry)
             
             db.commit()
+            try:
+                new_streak = compute_streak_from_emotion_daily(db, user_id)
+                db.execute(
+                    text("UPDATE users SET streak = :streak, updated_at = :t WHERE user_id = :uid"),
+                    {"streak": new_streak, "t": time.time(), "uid": user_id},
+                )
+
+                db.commit()
+                result["streak"] = new_streak  # return to Flutter
+            except Exception as e:
+                db.rollback()
+                print(f"❌ Streak update failed: {e}")
         except Exception as db_e:
             db.rollback()
             print(f"❌ DB Error: {db_e}")
@@ -451,6 +488,83 @@ async def analyze_session_endpoint(
             os.remove(temp_path)
 
 
+# image !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+@app.post("/api/analyze_image")
+async def analyze_image_endpoint(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    user_id = current_user["user_id"]
+
+    try:
+        image_bytes = await file.read()
+
+        # Run CPU-heavy work off the event loop
+        result = await run_in_threadpool(image_service.analyze_image_bytes, image_bytes)
+
+        emotion = result.get("dominant_emotion", "Neutral")
+        confidence = float(result.get("confidence", 0.0))
+
+        # Optional: if no face detected, you may want to skip DB logging
+        # If you still want to log "Neutral" sessions, remove this early return.
+        # if not result.get("face_detected", False):
+        #     return result
+
+        # ---- DB SAVE (same pattern as your video endpoint) ----
+        try:
+            today_str = date.today().isoformat()
+
+            new_log = models.MoodSession(
+                user_id=user_id,
+                emotion=emotion,
+                confidence=confidence,
+                timestamp=time.time(),
+            )
+            db.add(new_log)
+
+            daily_entry = db.query(models.DailySummary).filter(
+                models.DailySummary.user_id == user_id,
+                models.DailySummary.date_str == today_str
+            ).first()
+
+            if daily_entry:
+                counts = json.loads(daily_entry.emotion_counts)
+                counts[emotion] = counts.get(emotion, 0) + 1
+                daily_entry.emotion_counts = json.dumps(counts)
+            else:
+                daily_entry = models.DailySummary(
+                    user_id=user_id,
+                    date_str=today_str,
+                    emotion_counts=json.dumps({emotion: 1})
+                )
+                db.add(daily_entry)
+
+            db.commit()
+
+            # streak update (same as video)
+            try:
+                new_streak = compute_streak_from_emotion_daily(db, user_id)
+                db.execute(
+                    text("UPDATE users SET streak = :streak, updated_at = :t WHERE user_id = :uid"),
+                    {"streak": new_streak, "t": time.time(), "uid": user_id},
+                )
+                db.commit()
+                result["streak"] = new_streak
+            except Exception as e:
+                db.rollback()
+                print(f"❌ Streak update failed: {e}")
+
+        except Exception as db_e:
+            db.rollback()
+            print(f"❌ DB Error (image): {db_e}")
+
+        return result
+
+    except Exception as e:
+        print(f"❌ Server Error (image): {e}")
+        return {"dominant_emotion": "Neutral", "confidence": 0.0, "raw_breakdown": {}, "face_detected": False}
+#--------------------------------------------------------
 # @app.post("/api/analyze_session")
 # async def analyze_session_endpoint(
 #     file: UploadFile = File(...), 

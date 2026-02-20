@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from passlib.context import CryptContext
 from datetime import datetime, timedelta
 from jose import jwt
-from setup_db import DB_PATH
+from agent.setup_db import DB_PATH
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from datetime import date

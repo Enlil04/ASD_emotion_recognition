@@ -70,7 +70,7 @@
 #     readable_time = Column(String, nullable=True)
 #     event_type = Column(String, nullable=True)
 from sqlalchemy import Column, Integer, String, Float
-from setup_db import Base
+from agent.setup_db import Base
 
 # 1. USERS
 class User(Base):

@@ -1,7 +1,7 @@
 import time
 from datetime import date, timedelta
 
-from setup_db import DB_PATH
+from agent.setup_db import DB_PATH
 from sqlalchemy import create_engine
 import sqlite3
 
