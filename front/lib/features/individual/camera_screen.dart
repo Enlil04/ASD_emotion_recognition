@@ -1,4 +1,4 @@
-import 'dart:async';
+//import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import '../../theme/app_colors.dart';
@@ -18,8 +18,8 @@ class _CameraScreenState extends State<CameraScreen> with AutomaticKeepAliveClie
   // STATE VARIABLES
   bool _isRecording = false; 
   bool _isAnalyzing = false; 
-  int _timeLeft = 5;
-  Timer? _timer;
+  //int _timeLeft = 5;
+  //Timer? _timer;
 
   // STATIC MEMORY
   static List<Map<String, dynamic>> _recentSessions = [];
@@ -77,79 +77,119 @@ class _CameraScreenState extends State<CameraScreen> with AutomaticKeepAliveClie
   @override
   void dispose() {
     _controller?.dispose();
-    _timer?.cancel();
+    //_timer?.cancel();
     super.dispose();
   }
 
-  void _startSession() async {
-    if (!_isCameraInitialized || _isRecording || _isAnalyzing) return;
+  // void _startSession() async {
+  //   if (!_isCameraInitialized || _isRecording || _isAnalyzing) return;
 
-    try {
-      await _controller!.startVideoRecording();
+  //   try {
+  //     await _controller!.startVideoRecording();
       
-      setState(() {
-        _isRecording = true;
-        _timeLeft = 5; 
-      });
+  //     setState(() {
+  //       _isRecording = true;
+  //       _timeLeft = 5; 
+  //     });
 
-      _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
-        if (mounted) {
-          if (_timeLeft > 0) {
-            setState(() => _timeLeft--);
-          } else {
-            _stopSession(); 
-          }
-        }
-      });
+  //     _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
+  //       if (mounted) {
+  //         if (_timeLeft > 0) {
+  //           setState(() => _timeLeft--);
+  //         } else {
+  //           _stopSession(); 
+  //         }
+  //       }
+  //     });
 
-    } catch (e) {
-      debugPrint("Error starting: $e");
-    }
-  }
+  //   } catch (e) {
+  //     debugPrint("Error starting: $e");
+  //   }
+  // }
 
-  void _stopSession() async {
-    _timer?.cancel();
-    if (!_isRecording) return;
+  // void _stopSession() async {
+  //   _timer?.cancel();
+  //   if (!_isRecording) return;
 
-    try {
-      final XFile videoFile = await _controller!.stopVideoRecording();
+  //   try {
+  //     final XFile videoFile = await _controller!.stopVideoRecording();
       
-      setState(() {
-        _isRecording = false;
-        _isAnalyzing = true; 
-      });
+  //     setState(() {
+  //       _isRecording = false;
+  //       _isAnalyzing = true; 
+  //     });
 
-      // API Call
-      Map<String, dynamic> result = await ApiService.analyzeSession(videoFile.path);
+  //     // API Call
+  //     Map<String, dynamic> result = await ApiService.analyzeSession(videoFile.path);
       
-      String emotion = result['dominant_emotion'] ?? "Unknown";
-      dynamic rawConf = result['confidence'] ?? 0;
-      int confidence = (rawConf is double) ? rawConf.toInt() : (rawConf as int);
+  //     String emotion = result['dominant_emotion'] ?? "Unknown";
+  //     dynamic rawConf = result['confidence'] ?? 0;
+  //     int confidence = (rawConf is double) ? rawConf.toInt() : (rawConf as int);
       
-      if (mounted) {
-        setState(() {
-          _isAnalyzing = false;
-          _timeLeft = 5; 
+  //     if (mounted) {
+  //       setState(() {
+  //         _isAnalyzing = false;
+  //         _timeLeft = 5; 
           
-          _recentSessions.insert(0, {
-            "label": emotion,
-            "confidence": confidence,
-            "time": _getCurrentTime(),
-            "color": _getColorForEmotion(emotion),
-          });
-        });
-      }
+  //         _recentSessions.insert(0, {
+  //           "label": emotion,
+  //           "confidence": confidence,
+  //           "time": _getCurrentTime(),
+  //           "color": _getColorForEmotion(emotion),
+  //         });
+  //       });
+  //     }
 
-    } catch (e) {
-      debugPrint("Error stopping: $e");
-      if (mounted) {
-        setState(() {
-          _isRecording = false;
-          _isAnalyzing = false;
-        });
-      }
-    }
+  //   } catch (e) {
+  //     debugPrint("Error stopping: $e");
+  //     if (mounted) {
+  //       setState(() {
+  //         _isRecording = false;
+  //         _isAnalyzing = false;
+  //       });
+  //     }
+  //   }
+  // }
+  Future<void> _capturePhoto() async {
+  if (!_isCameraInitialized || _isAnalyzing) return;
+
+  try {
+    setState(() {
+      _isAnalyzing = true;
+    });
+
+    final XFile imageFile = await _controller!.takePicture();
+
+    // API Call (image)
+    final Map<String, dynamic> result = await ApiService.analyzeImage(imageFile.path);
+
+    final String emotion = (result['dominant_emotion'] ?? "Unknown").toString();
+    final dynamic rawConf = result['confidence'] ?? 0;
+
+    // your backend returns confidence as %
+    final int confidence = (rawConf is num) ? rawConf.round() : 0;
+
+    if (!mounted) return;
+
+    setState(() {
+      _isAnalyzing = false;
+
+      _recentSessions.insert(0, {
+        "label": emotion,
+        "confidence": confidence,
+        "time": _getCurrentTime(),
+        "color": _getColorForEmotion(emotion),
+      });
+    });
+  } catch (e) {
+    debugPrint("Error capturing image: $e");
+    if (!mounted) return;
+    setState(() {
+      _isAnalyzing = false;
+    });
   }
+}
+
 
   String _getCurrentTime() {
     final now = DateTime.now();
@@ -243,10 +283,7 @@ class _CameraScreenState extends State<CameraScreen> with AutomaticKeepAliveClie
                                     color: AppColors.lighterblue.withOpacity(0.8),
                                     borderRadius: BorderRadius.circular(20),
                                   ),
-                                  child: Text(
-                                    "Recording: $_timeLeft s",
-                                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                                  ),
+            
                                 ),
                               ),
 
@@ -296,7 +333,7 @@ class _CameraScreenState extends State<CameraScreen> with AutomaticKeepAliveClie
             Padding(
               padding: const EdgeInsets.only(top: 9, bottom: 30),
               child: GestureDetector(
-                onTap: _isRecording ? null : _startSession, 
+                onTap: _isAnalyzing ? null : _capturePhoto, 
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 300),
                   height: 80,
@@ -311,19 +348,20 @@ class _CameraScreenState extends State<CameraScreen> with AutomaticKeepAliveClie
                   ),
                   child: Center(
                     child: Icon(
-                      _isRecording ? Icons.hourglass_bottom : Icons.videocam,
-                      color: Colors.white,
-                      size: 35,
-                    ),
+                        _isAnalyzing ? Icons.hourglass_bottom : Icons.camera_alt,
+                        color: Colors.white,
+                        size: 35,
+                      ),
                   ),
                 ),
               ),
             ),
-            if (!_isRecording && !_isAnalyzing)
+           if (!_isAnalyzing)
               const Padding(
                 padding: EdgeInsets.only(bottom: 20),
-                child: Text("Tap to start 5s Session", style: TextStyle(color: AppColors.textDark)),
+                child: Text("Tap to take a photo", style: TextStyle(color: AppColors.textDark)),
               )
+
           ],
         ),
       ),

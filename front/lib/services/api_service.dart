@@ -174,6 +174,34 @@ static Future<List<dynamic>> fetchProfileActivity(String userId,
 
 
 
+  //=============================image ===============================
+  static Future<Map<String, dynamic>> analyzeImage(String imagePath) async {
+  final url = Uri.parse('$baseUrl/api/analyze_image');
+
+  final token = await getToken(); 
+  final request = http.MultipartRequest('POST', url);
+
+  if (token != null && token.isNotEmpty) {
+    request.headers['Authorization'] = 'Bearer $token';
+  }
+
+  
+  request.files.add(await http.MultipartFile.fromPath(
+    'file',
+    imagePath,
+    contentType: MediaType('image', 'jpeg'), // requires http_parser
+  ));
+
+  final streamed = await request.send();
+  final response = await http.Response.fromStream(streamed);
+
+  if (response.statusCode != 200) {
+    throw Exception('Image analysis failed ${response.statusCode}: ${response.body}');
+  }
+
+  return jsonDecode(response.body) as Map<String, dynamic>;
+}
+//==================================================
   static Future<Map<String, dynamic>> analyzeSession(String videoPath) async {
     try {
       var request = http.MultipartRequest(

@@ -9,6 +9,8 @@ import 'features/individual/navigation.dart';
 import 'user_role.dart'; 
 import 'auth/login_screen.dart';
 import 'auth/signup/role_screen.dart';
+
+
 // 1. Global Camera Variable
 // We need this to pass the camera list to the CameraScreen later
 List<CameraDescription> cameras = []; 
