@@ -3,10 +3,11 @@ import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart'; 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+//10.150174.50
 
 class ApiService {
   
-  static const String baseUrl = 'http://10.150.174.50:8000';
+  static const String baseUrl = 'http://10.0.2.2:8000';
   static const _storage = FlutterSecureStorage();
 
 //------------------------ register here ---------------------------------
@@ -175,32 +176,50 @@ static Future<List<dynamic>> fetchProfileActivity(String userId,
 
 
   //=============================image ===============================
+//=============================image ===============================
   static Future<Map<String, dynamic>> analyzeImage(String imagePath) async {
-  final url = Uri.parse('$baseUrl/api/analyze_image');
+    final url = Uri.parse('$baseUrl/api/analyze_image');
+    final token = await getToken(); 
+    final request = http.MultipartRequest('POST', url);
 
-  final token = await getToken(); 
-  final request = http.MultipartRequest('POST', url);
+    if (token != null && token.isNotEmpty) {
+      request.headers['Authorization'] = 'Bearer $token';
+    }
 
-  if (token != null && token.isNotEmpty) {
-    request.headers['Authorization'] = 'Bearer $token';
+    request.files.add(await http.MultipartFile.fromPath(
+      'file',
+      imagePath,
+      contentType: MediaType('image', 'jpeg'), 
+    ));
+
+    try {
+      final streamed = await request.send();
+      final response = await http.Response.fromStream(streamed);
+
+      if (response.statusCode == 200) {
+        // Success or AI handled the error (like bad lighting)
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      } else {
+        // Server crashed
+        return {
+          "status": "error",
+          "face_detected": false,
+          "message": "Server error ${response.statusCode}"
+        };
+      }
+    } catch (e) {
+      // Phone has no internet
+      return {
+        "status": "error",
+        "face_detected": false,
+        "message": "Connection failed. Check your internet."
+      };
+    }
   }
 
-  
-  request.files.add(await http.MultipartFile.fromPath(
-    'file',
-    imagePath,
-    contentType: MediaType('image', 'jpeg'), // requires http_parser
-  ));
 
-  final streamed = await request.send();
-  final response = await http.Response.fromStream(streamed);
 
-  if (response.statusCode != 200) {
-    throw Exception('Image analysis failed ${response.statusCode}: ${response.body}');
-  }
 
-  return jsonDecode(response.body) as Map<String, dynamic>;
-}
 //==================================================
   static Future<Map<String, dynamic>> analyzeSession(String videoPath) async {
     try {
@@ -236,7 +255,7 @@ static Future<List<dynamic>> fetchProfileActivity(String userId,
 
   // --- NEW METHODS FOR DASHBOARD ---
 
-  static Future<Map<String, dynamic>> fetchWeeklyEmotions(String userId) async {
+  static Future<Map<String, dynamic>> fetchWeeklyEmotions(String? userId) async {
     // final url = Uri.parse("$baseUrl/api/emotions/weekly?user_id=$userId");
      final url = Uri.parse("$baseUrl/api/emotions/weekly").replace(
     queryParameters: (userId != null && userId.isNotEmpty)
@@ -298,7 +317,7 @@ static Future<List<dynamic>> fetchProfileActivity(String userId,
     //   qs["user_id"] = userId; // enables liked_by_me on backend
     // }
     final url = Uri.parse("$baseUrl/api/community/posts").replace(queryParameters: qs);
-    final response = await http.get(url);
+    final response = await http.get(url, headers: await authHeaders());
 
     if (response.statusCode == 200) {
       return jsonDecode(response.body) as Map<String, dynamic>;
@@ -422,7 +441,7 @@ static Future<List<dynamic>> fetchProfileActivity(String userId,
   // (8) GET /api/users/{user_id}  - Public user profile
   static Future<Map<String, dynamic>> fetchUserProfile(String userId) async {
     final url = Uri.parse("$baseUrl/api/users/$userId");
-    final response = await http.get(url);
+    final response = await http.get(url, headers: await authHeaders());
 
     if (response.statusCode == 200) {
       return jsonDecode(response.body) as Map<String, dynamic>;
@@ -524,15 +543,25 @@ static Future<void> connectWithCode({
 
 // Optional for later (therapist screen)
 static Future<List<dynamic>> fetchMyPatients() async {
-  final url = Uri.parse("$baseUrl/api/therapist/patients");
-   final response = await http.get(url, headers: await authHeaders());
+  // 1. Get the role to see if we should even be using the 'therapist' path
+  final role = await getRole(); 
+  
+  // 2. Adjust the path based on role (Hypothetical paths - check your backend docs!)
+  String path = "/api/therapist/my_patients"; // Default to therapist path
 
+
+  final url = Uri.parse("$baseUrl$path");
+  
+  print("DEBUG: Requesting patients from $url"); // This will tell you the truth in the console
+  
+  final response = await http.get(url, headers: await authHeaders());
 
   if (response.statusCode == 200) {
     final data = jsonDecode(response.body) as Map<String, dynamic>;
     return (data["items"] as List<dynamic>? ?? []);
   } else {
-    throw Exception("Fetch patients failed: ${response.statusCode} ${response.body}");
+    // This will now show you the exact URL that failed in your Flutter console
+    throw Exception("Fetch failed (404). URL: $url");
   }
 }
 
@@ -542,7 +571,18 @@ static Future<List<dynamic>> fetchMyPatients() async {
 static Future<Map<String, dynamic>> fetchMyProfile() async {
   final url = Uri.parse("$baseUrl/api/profile/me");
   final res = await http.get(url, headers: await authHeaders());
-  if (res.statusCode == 200) return jsonDecode(res.body) as Map<String, dynamic>;
+
+  // 👉 ADD IT RIGHT HERE!
+  if (res.statusCode == 401) {
+    await logout();
+    throw Exception("Session expired. Please log in again.");
+  }
+
+  // Then continue with your normal success check
+  if (res.statusCode == 200) {
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+  
   throw Exception("Fetch my profile failed: ${res.statusCode} ${res.body}");
 }
 
@@ -570,6 +610,65 @@ static Future<Map<String, dynamic>> updateMyProfile({
   throw Exception("Update profile failed: ${res.statusCode} ${res.body}");
 }
 //-------------------------------------------------------
+
+
+
+
+
+// 1. Fetch entire garden
+static Future<Map<String, dynamic>> fetchGardenData() async {
+  final url = Uri.parse("$baseUrl/api/garden");
+  final response = await http.get(url, headers: await authHeaders());
+
+  if (response.statusCode == 200) {
+    return jsonDecode(response.body);
+  } else {
+    throw Exception("Failed to load garden");
+  }
+}
+
+// 2. Plant a seed
+static Future<void> plantSeed(int potIndex, String seedType) async {
+  final url = Uri.parse("$baseUrl/api/garden/plant");
+  final response = await http.post(
+    url,
+    headers: await authHeaders(),
+    body: jsonEncode({"pot_index": potIndex, "seed_type": seedType}),
+  );
+
+  if (response.statusCode != 200) {
+    print("API ERROR: ${response.statusCode} - ${response.body}"); 
+    // ^ This will print "422" if your headers are wrong, or "401" if auth fails.
+  }
+}
+
+// 3. Water a plant
+static Future<void> waterPlant(int potIndex, String date) async {
+  final url = Uri.parse("$baseUrl/api/garden/water");
+  await http.post(
+    url,
+    headers: await authHeaders(),
+    body: jsonEncode({
+      "pot_index": potIndex,
+      "date": date,
+    }),
+  );
+}
+
+// 4. Harvest a plant
+static Future<void> harvestPlant(int potIndex, String plantType, String date) async {
+  final url = Uri.parse("$baseUrl/api/garden/harvest");
+  await http.post(
+    url,
+    headers: await authHeaders(),
+    body: jsonEncode({
+      "pot_index": potIndex,
+      "plant_type": plantType,
+      "harvest_date": date,
+    }),
+  );
+}
+
 
 
 }

@@ -1,7 +1,9 @@
 import os
 import time
 import sqlite3
-from realtime import Optional
+from typing import Optional
+# from realtime import AsyncRealtimeClientimport
+# from realtime import Optional
 import uvicorn
 from datetime import date, timedelta
 
@@ -11,32 +13,39 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 #for signup
-from agent.services.auth import router as auth_router
+from services.auth import router as auth_router
 
 #for code generation from therapist side
 import random
 import string
 
-from agent.services.auth import get_current_user
+from services.auth import get_current_user
 from sqlalchemy import text
 
-from agent.services.image_service import image_service
+from services.image_service import ImageEmotionService
 
 
 # --- 1. IMPORT PATHS & DB FROM SETUP_DB (Source of Truth) ---
 # We import DB_PATH and DATA_DIR so we don't accidentally create a second file
-from agent.setup_db import Base, engine, get_db, DB_PATH, DATA_DIR
-import agent.services.models as models
+from setup_db import Base, engine, get_db, DB_PATH, DATA_DIR
+import services.models as models
 
-from agent.react_agent import AgenticBrain
+from react_agent import AgenticBrain
 from analytics.vision_models.emotion_detector import EmotionDetector, MODEL_FILE
-from agent.services.video_service import video_service 
+detector_instance = EmotionDetector(MODEL_FILE)
+from services.video_service import VideoProcessor, VideoProcessor
 
 
-from agent.services.analytics import _calculate_stats, _fetch_recent_raw_logs, _is_new_user
+from services.analytics import _calculate_stats, _fetch_recent_raw_logs, _is_new_user
 
 # Ensure tables exist (using the imported engine)
 Base.metadata.create_all(bind=engine)
+
+video_service = VideoProcessor(detector_instance)
+image_service = ImageEmotionService(detector_instance)
+
+
+
 
 # --- CONFIG ---
 # We use the DATA_DIR imported from setup_db
@@ -60,28 +69,58 @@ brain = None
 class ChatMessage(BaseModel):
     message: str
 
+
+
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],          # tighten this in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # -----------------------------------------------------------------
 # HELPER FUNCTIONS
 # -----------------------------------------------------------------
 
-def compute_streak_from_emotion_daily(db: Session, user_id: str, days_cap: int = 365) -> int:
+from datetime import date, timedelta
+from sqlalchemy import text
+
+from datetime import date, timedelta
+from sqlalchemy import text
+
+from datetime import date, timedelta
+from sqlalchemy import text
+
+def compute_streak_from_emotion_daily(db: Session, user_id: str) -> int:
+    # 1. Fetch dates (already sorted by DB for efficiency)
+    query = text("SELECT date_str FROM emotion_daily WHERE user_id = :uid ORDER BY date_str DESC")
+    rows = db.execute(query, {"uid": user_id}).fetchall()
+    
+    # Using a set makes lookups O(1) instead of O(N)
+    logged_dates = {r[0] for r in rows} 
+    if not logged_dates:
+        return 0
+
+    today = date.today()
+    yesterday = today - timedelta(days=1)
+    
+    # 2. Identify the 'Head' of the streak
+    if today.isoformat() in logged_dates:
+        curr = today
+    elif yesterday.isoformat() in logged_dates:
+        curr = yesterday
+    else:
+        return 0 # Last activity was > 1 day ago
+
+    # 3. Iterate backwards
     streak = 0
-    d = date.today()
-
-    for _ in range(days_cap):
-        day_str = d.isoformat()
-
-        exists = db.execute(
-            text("SELECT 1 FROM emotion_daily WHERE user_id = :uid AND date_str = :ds LIMIT 1"),
-            {"uid": user_id, "ds": day_str},
-        ).fetchone()
-
-        if not exists:
-            break
-
+    while curr.isoformat() in logged_dates:
         streak += 1
-        d -= timedelta(days=1)
-
+        curr -= timedelta(days=1)
+        
     return streak
 
 
@@ -344,16 +383,33 @@ async def weekly_emotions(
         con.close()
 
 
+# Make sure you have these imported at the top of your file if they aren't already:
+# from sqlalchemy.orm import Session
+# from database import get_db
+from services.models import GardenPot, HarvestRequest, HarvestedPlant, PlantRequest, User, WaterRequest
+
 @app.post("/chat")
 async def chat_endpoint(
     chat: ChatMessage, 
-    current_user: dict = Depends(get_current_user),):
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db) # 👉 1. Add DB dependency here
+):
     user_id = current_user["user_id"]
+    
     if system_state["brain_busy"]:
         return {"response": "Thinking..."}
     
     system_state["brain_busy"] = True
     try:
+        # 👉 2. Fetch the real username from the database
+        db_user = db.query(User).filter(User.user_id == user_id).first()
+        if db_user:
+            u_name = (db_user.username or "").strip()
+            f_name = (db_user.name or "").strip()
+            username = u_name if u_name else (f_name if f_name else "User")
+        else:
+            username = "User"
+
         vision_packet = {
             "emotion": system_state["latest_emotion"],
             "face_detected": system_state["face_detected"],
@@ -364,7 +420,8 @@ async def chat_endpoint(
             brain.decide_response, 
             vision_data=vision_packet,
             prompt_text=chat.message,
-            extra_context={}
+            # 👉 3. Hand the username directly to the AI!
+            extra_context={"username": username} 
         )
         return {"response": response_text}
     except Exception as e:
@@ -372,7 +429,7 @@ async def chat_endpoint(
         return {"response": "Error processing chat."}
     finally:
         system_state["brain_busy"] = False
-
+        
 # -----------------------------------------------------------------
 # THE VIDEO ENDPOINT (With Fixed DB Logic)
 # -----------------------------------------------------------------
@@ -392,54 +449,21 @@ async def analyze_session_endpoint(
 
         # 1. Process Video
         result = await run_in_threadpool(video_service.process_session, temp_path)
-        print(f"✅ Final App Result: {result['dominant_emotion']} ({result['confidence']}%)")
-
-        #caluclate full percentages
-        counts = result.get("emotion_counts", {})
-        total_counts = sum(counts.values())
-
-        print(f"📊 RAW ANALYSIS RESULT: {result}")
-        percentages = {emo: (cnt / total_counts * 100, 2) for emo , cnt in counts.items()} if total_counts > 0 else {}
-
-        print("\n--- 🔍 PERCENTAGE EMOTION BREAKDOWN ---")
-        for emo, pct in sorted(percentages.items(), key=lambda x: x[1], reverse=True):
-            print(f"   {emo}: {pct}%")
-            print("---------------------------------\n")
-         
-        result["percentages"] = percentages
         
-        # 2. Extract Data
+        # 2. Data Extraction
+        face_found = result.get("face_detected", False)
         emotion = result.get("dominant_emotion", "Neutral")
         confidence = float(result.get("confidence", 0.0))
-        # This is the "Raw List" from your VideoProcessor
-        raw_counts = result.get("emotion_counts", {}) 
 
-        # --- DEBUG LOGGING ---
-        print("\n--- 🔍 RAW EMOTION BREAKDOWN ---")
-        # Sort counts to see the runner-up
-        sorted_emotions = sorted(raw_counts.items(), key=lambda x: x[1], reverse=True)
-        for emo, count in sorted_emotions:
-            print(f"   {emo}: {count} frames")
-        print(f"   Final Decision: {emotion} ({confidence}%)")
-        print("---------------------------------\n")
-
-        # 3. FIX: Adjusting the "Neutral Lock" logic
-        # If Neutral won, but the runner-up is very close, you might want to know.
-        if confidence < 15.0: 
-            emotion = "Neutral"
-            
-        # 4. DATABASE SAVING (Corrected JSON logic)
-        try:
+        # 3. DB Logic: Only commit if the AI actually saw a person
+        if face_found:
             today_str = date.today().isoformat()
             
-            # Save Raw Log
-            new_log = models.MoodSession(
-                user_id=user_id, 
-                emotion=emotion,
-                confidence=confidence, 
-                timestamp=time.time()
-            )
-            db.add(new_log)
+            # Save the raw session
+            db.add(models.MoodSession(
+                user_id=user_id, emotion=emotion,
+                confidence=confidence, timestamp=time.time()
+            ))
 
             # Update Daily Summary
             daily_entry = db.query(models.DailySummary).filter(
@@ -452,40 +476,31 @@ async def analyze_session_endpoint(
                 counts[emotion] = counts.get(emotion, 0) + 1
                 daily_entry.emotion_counts = json.dumps(counts)
             else:
-                daily_entry = models.DailySummary(
+                db.add(models.DailySummary(
                     user_id=user_id, date_str=today_str,
                     emotion_counts=json.dumps({emotion: 1})
-                )
-                db.add(daily_entry)
+                ))
             
+            # Sync Streak
+            new_streak = compute_streak_from_emotion_daily(db, user_id)
+            db.execute(
+                text("UPDATE users SET streak = :streak, updated_at = :t WHERE user_id = :uid"),
+                {"streak": new_streak, "t": time.time(), "uid": user_id},
+            )
+
             db.commit()
-            try:
-                new_streak = compute_streak_from_emotion_daily(db, user_id)
-                db.execute(
-                    text("UPDATE users SET streak = :streak, updated_at = :t WHERE user_id = :uid"),
-                    {"streak": new_streak, "t": time.time(), "uid": user_id},
-                )
+            result["streak"] = new_streak
 
-                db.commit()
-                result["streak"] = new_streak  # return to Flutter
-            except Exception as e:
-                db.rollback()
-                print(f"❌ Streak update failed: {e}")
-        except Exception as db_e:
-            db.rollback()
-            print(f"❌ DB Error: {db_e}")
-
-        # 5. RETURN RAW LIST TO FRONTEND
-        # We add 'raw_breakdown' so your Flutter/React app can see the full list
-        result["raw_breakdown"] = raw_counts
         return result
 
     except Exception as e:
+        db.rollback()
         print(f"❌ Server Error: {e}")
-        return {"dominant_emotion": "Neutral", "confidence": 0.0, "raw_breakdown": {}}
+        return {"dominant_emotion": "Neutral", "face_detected": False}
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
+
 
 
 # image !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -506,12 +521,7 @@ async def analyze_image_endpoint(
         emotion = result.get("dominant_emotion", "Neutral")
         confidence = float(result.get("confidence", 0.0))
 
-        # Optional: if no face detected, you may want to skip DB logging
-        # If you still want to log "Neutral" sessions, remove this early return.
-        # if not result.get("face_detected", False):
-        #     return result
-
-        # ---- DB SAVE (same pattern as your video endpoint) ----
+        # ---- DB SAVE (Single transaction pattern) ----
         try:
             today_str = date.today().isoformat()
 
@@ -529,9 +539,9 @@ async def analyze_image_endpoint(
             ).first()
 
             if daily_entry:
-                counts = json.loads(daily_entry.emotion_counts)
-                counts[emotion] = counts.get(emotion, 0) + 1
-                daily_entry.emotion_counts = json.dumps(counts)
+                counts_json = json.loads(daily_entry.emotion_counts)
+                counts_json[emotion] = counts_json.get(emotion, 0) + 1
+                daily_entry.emotion_counts = json.dumps(counts_json)
             else:
                 daily_entry = models.DailySummary(
                     user_id=user_id,
@@ -540,20 +550,16 @@ async def analyze_image_endpoint(
                 )
                 db.add(daily_entry)
 
+            # Update streak
+            new_streak = compute_streak_from_emotion_daily(db, user_id)
+            db.execute(
+                text("UPDATE users SET streak = :streak, updated_at = :t WHERE user_id = :uid"),
+                {"streak": new_streak, "t": time.time(), "uid": user_id},
+            )
+            
+            # Commit everything at once
             db.commit()
-
-            # streak update (same as video)
-            try:
-                new_streak = compute_streak_from_emotion_daily(db, user_id)
-                db.execute(
-                    text("UPDATE users SET streak = :streak, updated_at = :t WHERE user_id = :uid"),
-                    {"streak": new_streak, "t": time.time(), "uid": user_id},
-                )
-                db.commit()
-                result["streak"] = new_streak
-            except Exception as e:
-                db.rollback()
-                print(f"❌ Streak update failed: {e}")
+            result["streak"] = new_streak
 
         except Exception as db_e:
             db.rollback()
@@ -564,6 +570,8 @@ async def analyze_image_endpoint(
     except Exception as e:
         print(f"❌ Server Error (image): {e}")
         return {"dominant_emotion": "Neutral", "confidence": 0.0, "raw_breakdown": {}, "face_detected": False}
+
+
 #--------------------------------------------------------
 # @app.post("/api/analyze_session")
 # async def analyze_session_endpoint(
@@ -667,7 +675,7 @@ def _is_new_user(user_id: str) -> bool:
 
 
 @app.get("/api/recommendation/today")
-async def daily_recommendation(current_user: dict = Depends(get_current_user)):
+async def daily_recommendation(current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     """
     Generates a short daily recommendation based on:
     - last 7 days emotion aggregates (emotion_daily)
@@ -675,6 +683,25 @@ async def daily_recommendation(current_user: dict = Depends(get_current_user)):
     - onboarding if new user / no data
     """
     user_id = current_user["user_id"]
+
+
+    # 👉 2. Query the database for the real user object
+    db_user = db.query(models.User).filter(models.User.user_id == user_id).first()
+    
+    # 👉 3. Extract the real username, fallback to name, then "Friend"
+    if db_user:
+        username = db_user.username or db_user.name or "Friend"
+    else:
+        username = "Friend"
+
+
+    print(f"👤 Generating recommendation for user_id: {user_id} (username: {username})")
+
+
+    today_str = date.today().isoformat()
+
+
+
 
     today_str = date.today().isoformat()
     
@@ -735,7 +762,7 @@ async def daily_recommendation(current_user: dict = Depends(get_current_user)):
             f"Today is {today_str}.\n"
             f"{stats_text}\n\n"
             f"TASK:\n"
-            f"Welcome the user briefly, explain that recommendations personalize after a few check-ins, "
+            f"Start with welcoming {username}, explain that recommendations personalize after a few check-ins, "
             f"and give ONE small actionable suggestion they can do now (breathing, short walk, hydration).\n"
             f"Keep it 1-2 short sentences."
         )
@@ -745,6 +772,7 @@ async def daily_recommendation(current_user: dict = Depends(get_current_user)):
             f"{stats_text}\n\n"
             f"Current mood right now (latest detected): {vision_packet['emotion']}.\n\n"
             f"TASK:\n"
+            f"Address the user directly by their name: {username}.\n"
             f"Give ONE practical recommendation for today tailored to the chosen dominant emotion: {dominant}.\n"
             f"- If dominant is Angry or Sad: suggest calming / coping / support.\n"
             f"- If dominant is Happy: suggest maintaining habits + a small growth challenge.\n"
@@ -765,10 +793,12 @@ async def daily_recommendation(current_user: dict = Depends(get_current_user)):
         brain_module.decide_response,
         vision_data=vision_packet,
         prompt_text=prompt,
+        save_to_history=False,  # We might not want to save this system-generated recommendation as a user message
         extra_context={
             "weekly_stats": week_stats, 
             "mode": mode, 
-            "dominant": dominant
+            "dominant": dominant,
+            "username" : username
         },
     )
 
@@ -1905,8 +1935,92 @@ async def update_my_profile(
 
 
 
+
+
+
+
+
+import traceback # Add this to the top of your file with the other imports
+
+@app.get("/api/garden")
+def get_garden(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    u_id = current_user["user_id"] # <-- Extract the string ID directly
+    
+    pots = db.query(GardenPot).filter(GardenPot.user_id == u_id).all()
+    bouquet = db.query(HarvestedPlant).filter(HarvestedPlant.user_id == u_id).order_by(HarvestedPlant.id.desc()).all()
+
+    return {
+        "pots": [{"pot_index": p.pot_index, "seed_type": p.seed_type, "stage": p.stage, "last_watered": p.last_watered} for p in pots],
+        "bouquet": [{"plant_type": b.plant_type, "harvest_date": b.harvest_date} for b in bouquet]
+    }
+
+@app.post("/api/garden/plant")
+def plant_seed(req: PlantRequest, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    u_id = current_user["user_id"]
+    
+    pot = db.query(GardenPot).filter(GardenPot.user_id == u_id, GardenPot.pot_index == req.pot_index).first()
+    
+    if pot:
+        pot.seed_type = req.seed_type
+        pot.stage = 0
+        pot.last_watered = None
+    else:
+        pot = GardenPot(user_id=u_id, pot_index=req.pot_index, seed_type=req.seed_type, stage=0, last_watered=None)
+        db.add(pot)
+
+    db.commit()
+    return {"message": "Seed planted successfully"}
+
+@app.post("/api/garden/water")
+def water_plant(req: WaterRequest, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    u_id = current_user["user_id"]
+    
+    pot = db.query(GardenPot).filter(GardenPot.user_id == u_id, GardenPot.pot_index == req.pot_index).first()
+    
+    if not pot or not pot.seed_type:
+        raise HTTPException(status_code=404, detail="Pot is empty or not found")
+
+    if pot.stage < 4:
+        pot.stage += 1
+    
+    pot.last_watered = req.date
+    db.commit()
+    return {"message": "Plant watered"}
+
+@app.post("/api/garden/harvest")
+def harvest_plant(req: HarvestRequest, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    u_id = current_user["user_id"]
+    
+    pot = db.query(GardenPot).filter(GardenPot.user_id == u_id, GardenPot.pot_index == req.pot_index).first()
+    
+    if not pot:
+        raise HTTPException(status_code=404, detail="Pot not found")
+
+    new_harvest = HarvestedPlant(user_id=u_id, plant_type=req.plant_type, harvest_date=req.harvest_date)
+    db.add(new_harvest)
+
+    pot.seed_type = None
+    pot.stage = 0
+    pot.last_watered = None
+
+    db.commit()
+    return {"message": "Harvested successfully"}
+
+
+
+
+
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+
+
+
+
+
+
 
 
 

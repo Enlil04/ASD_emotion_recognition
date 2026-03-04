@@ -252,7 +252,31 @@ class _ProfileScreenState extends State<ProfileScreen> {
     if (userId == null || userId.isEmpty) {
       throw Exception("No user_id found in session. Please login again.");
     }
-    return ApiService.fetchMyProfile();
+    
+    try {
+      // Try to fetch the profile
+      return await ApiService.fetchMyProfile();
+    } catch (e) {
+      // 🚨 CATCH THE GHOST TOKEN HERE 🚨
+      final errorStr = e.toString().toLowerCase();
+      if (errorStr.contains('404') || errorStr.contains('403') || errorStr.contains('401') || errorStr.contains('forbidden') || errorStr.contains('not found')) {
+        debugPrint("Ghost Token Detected! Force logging out...");
+        
+        // 1. Wipe the dead token
+        await ApiService.logout(); 
+        
+        // 2. Kick back to the login screen
+        if (mounted) {
+          Navigator.of(context).pushAndRemoveUntil(
+            MaterialPageRoute(builder: (_) => const RoleGate()),
+            (route) => false,
+          );
+        }
+      }
+      
+      // If it's a different error (like no internet), pass it to the FutureBuilder
+      rethrow; 
+    }
   }
 
   Future<Map<String, dynamic>> _loadStats() async {

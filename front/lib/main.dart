@@ -47,3 +47,17 @@ class MyApp extends StatelessWidget {
     );
   }
 }
+
+
+
+
+
+
+// import 'features/individual/games_screen.dart'; // Import the GamesScreen
+// import 'package:flutter/material.dart';
+//  void main() async {
+//   runApp(MaterialApp(
+//     debugShowCheckedModeBanner: false,
+//     home:  GamesScreen(), // Start directly on the GamesScreen for testing
+//   ));
+// }

@@ -43,6 +43,7 @@ class MemoryManager:
     # --------------------------
     def load_profile(self) -> Dict[str, Any]:
         prefs = self.store.get_preferences(self.user_id) 
+        
         name = prefs.get("name", "User")
         triggers = prefs.get("triggers", [])
         preferences = prefs.get("preferences", {})

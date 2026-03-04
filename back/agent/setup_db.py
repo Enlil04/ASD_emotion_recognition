@@ -432,6 +432,27 @@ def setup_tables():
         PRIMARY KEY (therapist_id, patient_id)
     )
     """)
+
+    # 12. GARDEN POTS (Updated user_id to INTEGER and added UNIQUE constraint)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS garden_pots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,            -- Matches models.py Integer
+        pot_index INTEGER NOT NULL,
+        seed_type TEXT,
+        stage INTEGER DEFAULT 0,
+        last_watered TEXT,
+        UNIQUE(user_id, pot_index)           -- Matches models.py UniqueConstraint
+    )""")
+
+    # 13. HARVESTED PLANTS (Updated user_id to INTEGER)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS harvested_plants (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,           -- Matches models.py Integer
+        plant_type TEXT NOT NULL,
+        harvest_date TEXT NOT NULL
+    )""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_tp_therapist ON therapist_patient(therapist_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_tp_patient ON therapist_patient(patient_id)")
     #---------------------------------------------------------------------

@@ -61,7 +61,8 @@ class _UserSignUpState extends State<UserSignUp> {
     );
       if(picked != null){
         setState(() {
-          _dateOfBirthController.text = "${picked.year}-${picked.month}-${picked.day}";
+          _dateOfBirthController.text =
+  "${picked.year}-${picked.month.toString().padLeft(2, '0')}-${picked.day.toString().padLeft(2, '0')}";
         });
       }
   }

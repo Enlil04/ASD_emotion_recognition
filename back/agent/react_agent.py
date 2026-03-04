@@ -15,7 +15,7 @@ class AgenticBrain:
         self.brain = LlamaReasoner(model_name="llama3.2")
         self.memory = MemoryManager(db_path=db_path, user_id=user_id)
 
-    def decide_response(self, vision_data: dict, prompt_text: str = None, extra_context: dict = None):
+    def decide_response(self, vision_data: dict, prompt_text: str = None, extra_context: dict = None, save_to_history: bool = True):
         """
         Main entry point for the server to ask for a response.
         """
@@ -37,8 +37,11 @@ class AgenticBrain:
 
         # 4. Build the "Rich Context" (Enriched Payload)
         # This matches the structure expected by LlamaReasoner.think()
+
+        passed_name = extra_context.get("username") if extra_context else None
+
         context_snapshot = {
-            "user_name": user_profile.get("name", "User"),
+            "user_name": passed_name or user_profile.get("name") or "User",
             "triggers": user_profile.get("triggers", []),
             
             # Raw sensor data passed through
@@ -73,9 +76,14 @@ class AgenticBrain:
             print(f"⚙️ Tool Triggered: {action} -> {action_result}")
 
         # 7. Save the interaction in SQLite (Critical for memory!)
-        self.memory.save_interaction(user_text, speech, detected_emotion)
+        if save_to_history:
+            self.memory.save_interaction(user_text, speech, detected_emotion)
+            print("💾 Saved interaction to memory.")
+        else:
+            print("🚫 Background task: Skipped saving to memory.")
 
         return speech
+
 
     def _execute_tool(self, action_name):
         action_name = (action_name or "").lower().strip()

@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../../theme/app_colors.dart';
-import 'chat_screen.dart';
+import 'communitygames.dart';
 import 'package:flutter_application_1/user_role.dart';
 
 // NOTE: adjust this import path if your ApiService lives elsewhere in your project.
@@ -249,14 +249,19 @@ class _CommunityScreenState extends State<CommunityScreen> {
         automaticallyImplyLeading: false,
         actions: [
           IconButton(
-            icon: const Icon(Icons.chat_bubble_outline, color: AppColors.lighterblue),
+            icon: const Icon(Icons.sports_esports_outlined, color: AppColors.lighterblue),
             onPressed: () {
-              if (widget.userRole != UserRole.guardian) {
+
                 Navigator.push(
                   context,
-                  MaterialPageRoute(builder: (context) => const MessagesScreen()),
+                  MaterialPageRoute(builder: (context) => const CommunityGamesScreen()),
                 );
-              }
+              // if (widget.userRole != UserRole.guardian) {
+              //   Navigator.push(
+              //     context,
+              //     MaterialPageRoute(builder: (context) => const CommunityGamesScreen()),
+              //   );
+              // }
             },
           ),
           const SizedBox(width: 6),
@@ -696,17 +701,34 @@ class _CommunityPostDetailScreenState extends State<CommunityPostDetailScreen> {
     final author = (_post["author"] as Map<String, dynamic>? ?? {});
     final authorName = (author["name"] ?? author["username"] ?? "Unknown").toString();
 
-    return Scaffold(
-      backgroundColor: AppColors.background,
-      appBar: AppBar(
-        backgroundColor: AppColors.background,
-        elevation: 0,
-        iconTheme: const IconThemeData(color: AppColors.lighterblue),
-        title: const Text(
-          "Post",
-          style: TextStyle(color: AppColors.titletext, fontWeight: FontWeight.w500),
-        ),
-      ),
+    return PopScope(
+          canPop: false, // Prevents default pop so we can inject our data
+          onPopInvoked: (bool didPop) {
+            if (didPop) return;
+            // Send the updated _post back on Android swipe-back/physical back button
+            Navigator.pop(context, _post); 
+          },
+          child: Scaffold(
+            backgroundColor: AppColors.background,
+            appBar: AppBar(
+              backgroundColor: AppColors.background,
+              elevation: 0,
+              iconTheme: const IconThemeData(color: AppColors.lighterblue),
+              
+              // 👉 2. Add the leading button for the visual AppBar back arrow
+              leading: IconButton(
+                icon: const Icon(Icons.arrow_back),
+                onPressed: () {
+                  // Send the updated _post back when the arrow is tapped
+                  Navigator.pop(context, _post);
+                },
+              ),
+              
+              title: const Text(
+                "Post",
+                style: TextStyle(color: AppColors.titletext, fontWeight: FontWeight.w500),
+              ),
+            ),
       body: SafeArea(
         child: Column(
           children: [
@@ -859,6 +881,7 @@ class _CommunityPostDetailScreenState extends State<CommunityPostDetailScreen> {
           ],
         ),
       ),
+    ),
     );
   }}
 class _CommentTile extends StatelessWidget {
