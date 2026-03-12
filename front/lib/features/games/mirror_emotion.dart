@@ -1,0 +1,1 @@
+//future addition user is shown an image of a face and they have to mirror the emotion shown in the image. The user will be given a score based on how well they mirror the emotion. This game can help users improve their emotional recognition and expression skills.
