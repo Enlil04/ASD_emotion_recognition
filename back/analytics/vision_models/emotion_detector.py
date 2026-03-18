@@ -17,22 +17,22 @@ SMOOTHING_WINDOW = 5 # Increased for stability
 LABELS = ['Anger', 'Disgust', 'Fear', 'Happy', 'Neutral', 'Sad', 'Surprise']
 
 CLASS_MULTIPLIERS = {
-    "Anger": 0.8,    # 📉 Reduced to stop Neutral-to-Anger jitter
-    "Disgust": 0.45, 
-    "Fear": 9.0,
-    "Happy": 3.8,    # 📈 Boosted to beat Surprise
-    "Neutral": 4.0,  # 📈 Boosted to be the "Default" state
-    "Sad": 0.3,     # 📉 Heavily reduced to stop Neutral-to-Sad jitter
+    "Anger": 1.0,    # 📉 Reduced to stop Neutral-to-Anger jitter
+    "Disgust": 0.01, 
+    "Fear": 10.0,
+    "Happy": 1.5,    # 📈 Boosted to beat Surprise
+    "Neutral": 7.5,  # 📈 Boosted to be the "Default" state
+    "Sad": 1.5,     # 📉 Heavily reduced to stop Neutral-to-Sad jitter
     "Surprise": 0.9  # 📉 Reduced to stop Smile-to-Surprise jitter
 }
 
 BASE_THRESHOLDS = {
     "Anger": 0.35,   # 📈 Higher bar to trigger
-    "Disgust": 0.68, 
-    "Fear": 0.25,
-    "Happy": 0.10, 
-    "Neutral": 0.15, 
-    "Sad": 0.60,     # 📈 Needs high confidence to break Neutral
+    "Disgust": 1.0, 
+    "Fear": 0.20,
+    "Happy": 0.55, 
+    "Neutral": 0.20, 
+    "Sad": 0.28,     # 📈 Needs high confidence to break Neutral
     "Surprise": 0.3  # 📈 Needs high confidence to break Happy
 }
 
@@ -73,14 +73,29 @@ class EmotionDetector:
         
         m_height = np.linalg.norm(m_top - m_bot)
         m_width = np.linalg.norm(m_l - m_r)
-        
-        # Brow Distance (Inner Brow to Eye)
-        # Left: 52 to 159 | Right: 282 to 386
-        brow_dist = (abs(lm[52].y - lm[159].y) + abs(lm[282].y - lm[386].y)) / 2
-        
-        return m_height, m_width, brow_dist
 
+        # Anchored to the center of the mouth so closing your lips doesn't fake a frown!
+        mouth_center_y = (lm[13].y + lm[14].y) / 2
+        left_corner_drop = lm[61].y - mouth_center_y
+        right_corner_drop = lm[291].y - mouth_center_y
+        frown_metric = (left_corner_drop + right_corner_drop) / 2
+        
+        
+        # --- NEW DISGUST MATH: Nose Tip to Upper Lip ---
+        # Converting normalized coordinates to pixels using screen height (h)
+        nose_tip_y = lm[4].y * h
+        upper_lip_y = lm[13].y * h
+        nose_lip_dist = abs(nose_tip_y - upper_lip_y)
+        
+        # Normalize by mouth width (which stays relatively stable when scrunching)
+        nose_scrunch = nose_lip_dist / m_width if m_width > 0 else 0
 
+        # --- Sad Eyes (Inner Brow Raiser AU1) ---
+        inner_brow_y = (lm[105].y + lm[334].y) / 2
+        outer_brow_y = (lm[46].y + lm[276].y) / 2
+        brow_tilt = outer_brow_y - inner_brow_y 
+
+        return m_height, m_width, frown_metric, nose_scrunch, brow_tilt
 
     def predict(self, frame, smooth=True):
                 h, w, _ = frame.shape
@@ -113,7 +128,7 @@ class EmotionDetector:
                 avg_probs = np.mean(self.prob_buffer, axis=0)
 
                 # --- 3. GEOMETRY CALCULATIONS ---
-                m_h, m_w, b_dist = self.get_geometry(lm, w, h)
+                m_h, m_w, frown_metric, nose_scrunch, brow_tilt = self.get_geometry(lm, w, h)
                 m_ratio = m_h / m_w if m_w > 0 else 0
                 
                 # EAR (Eye Aspect Ratio) - detecting wide eyes
@@ -123,40 +138,83 @@ class EmotionDetector:
                 weighted = avg_probs.copy()
                 
                 # Order: ['Anger', 'Disgust', 'Fear', 'Happy', 'Neutral', 'Sad', 'Surprise']
-                # Rebalanced: Sad boosted to 0.8, Neutral slightly relaxed to 3.5
-                multipliers = [0.8, 0.45, 1.2, 4.0, 3.5, 0.8, 2.5] 
+                multipliers = [0.8, 0.25, 1.2, 6.5, 3.5, 1.0, 1.5] 
                 for i in range(len(LABELS)):
                     weighted[i] *= multipliers[i]
                 
-                # --- RULE 1: THE HAPPY GUARD (Smiles kill Sadness & Fear) ---
-                if m_ratio < 0.38: 
+                # --- RULE 1: THE HAPPY GUARD (Smiles kill Sadness, Fear, Anger) ---
+                if m_ratio < 0.38 and frown_metric < -0.015: 
                     weighted[LABELS.index("Happy")] *= 12.0
                     weighted[LABELS.index("Sad")] *= 0.01      
                     weighted[LABELS.index("Fear")] *= 0.01     
                     weighted[LABELS.index("Surprise")] *= 0.01
+                    weighted[LABELS.index("Anger")] *= 0.1
+                    weighted[LABELS.index("Disgust")] *= 0.1
 
-                # --- RULE 2: WIDE EYES (Fear vs Surprise) ---
-                # Lowered eye threshold slightly to make Surprise easier
-                elif e_open > 0.022:
-                    # Lowered from 0.60 to 0.48 so you don't have to open as wide
-                    if m_ratio > 0.48: 
-                        weighted[LABELS.index("Surprise")] *= 15.0
-                        weighted[LABELS.index("Fear")] *= 0.1
-                        weighted[LABELS.index("Sad")] *= 0.1
-                    elif 0.38 <= m_ratio <= 0.48: # Tense Horizontal Stretch
-                        weighted[LABELS.index("Fear")] *= 10.0
-                        weighted[LABELS.index("Surprise")] *= 0.1
-                        weighted[LABELS.index("Sad")] *= 0.1
+                # --- RULE 2: THE JAW DROP (Surprise) ---
+                elif m_ratio > 0.35: 
+                    weighted[LABELS.index("Surprise")] *= 18.0
+                    weighted[LABELS.index("Fear")] *= 0.1 
+                    weighted[LABELS.index("Neutral")] *= 0.1
+                    weighted[LABELS.index("Sad")] *= 0.1
+                    weighted[LABELS.index("Anger")] *= 0.1
 
-                # --- RULE 3: THE NEUTRAL / RESTING FACE GUARD ---
-                else:
-                    weighted[LABELS.index("Fear")] *= 0.05
-                    weighted[LABELS.index("Surprise")] *= 0.05
+                # --- RULE 3: WIDE EYES + TENSE MOUTH (Fear) ---
+                elif e_open > 0.025 and m_ratio <= 0.40:
+                    weighted[LABELS.index("Fear")] *= 18.0
+                    weighted[LABELS.index("Surprise")] *= 0.1 
+                    weighted[LABELS.index("Neutral")] *= 0.1
+                    weighted[LABELS.index("Sad")] *= 0.1
+                    weighted[LABELS.index("Anger")] *= 0.1
+
+                # --- RULE 4: THE NOSE SCRUNCH (Disgust) ---
+                # Raised threshold to 0.48. This makes Disgust MUCH easier to trigger physically.
+                elif nose_scrunch < 0.48:  
+                    weighted[LABELS.index("Disgust")] *= 15.0
+                    weighted[LABELS.index("Sad")] *= 0.1
+                    weighted[LABELS.index("Happy")] *= 0.1
+                    weighted[LABELS.index("Anger")] *= 0.1 
+
+                # --- RULE 5: THE COMBINED SADNESS SCORE (Adjusted for Closed Mouth) ---
+                # Raised from 0.022 to 0.030. This completely clears your natural closed-mouth resting state.
+                elif (frown_metric + brow_tilt) > 0.032:
+                    cnn_neutral = avg_probs[LABELS.index("Neutral")]
+                    cnn_sad = avg_probs[LABELS.index("Sad")]
                     
-                    # Only crush Sadness if the CNN is highly confident it's Neutral
-                    if avg_probs[LABELS.index("Neutral")] > 0.50:
-                        weighted[LABELS.index("Neutral")] *= 5.0
-                        weighted[LABELS.index("Sad")] *= 0.2
+                    if cnn_sad > cnn_neutral * 1.1:
+                        weighted[LABELS.index("Sad")] *= 15.0 
+                        weighted[LABELS.index("Neutral")] *= 0.1
+                        weighted[LABELS.index("Disgust")] *= 0.05 
+                        weighted[LABELS.index("Anger")] *= 0.05
+
+                # --- RULE 6: THE ULTIMATE NEUTRAL GUARD ---
+                else:
+                    weighted[LABELS.index("Fear")] *= 0.01
+                    weighted[LABELS.index("Surprise")] *= 0.01
+                    weighted[LABELS.index("Happy")] *= 0.05
+                    weighted[LABELS.index("Sad")] *= 0.01 # Kills the fake closed-mouth sadness
+                    
+                    cnn_anger = avg_probs[LABELS.index("Anger")]
+                    cnn_disgust = avg_probs[LABELS.index("Disgust")]
+
+                    # Anger Override
+                    if cnn_anger > 0.40:
+                        weighted[LABELS.index("Anger")] *= 8.0
+                        weighted[LABELS.index("Neutral")] *= 0.1
+                        
+                    # Disgust Override (Lowered requirement to 0.25 to bring Disgust back to life!)
+                    elif cnn_disgust > 0.25:
+                        weighted[LABELS.index("Disgust")] *= 8.0
+                        weighted[LABELS.index("Neutral")] *= 0.1
+                    
+                    # Unconditional Neutral Win
+                    else:
+                        weighted[LABELS.index("Neutral")] *= 15.0
+                        weighted[LABELS.index("Anger")] *= 0.01
+                        weighted[LABELS.index("Disgust")] *= 0.01
+
+
+
 
                 # --- FINAL CHOICE ---
                 idx = np.argmax(weighted)
